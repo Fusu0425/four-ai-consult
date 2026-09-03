@@ -1,0 +1,24 @@
+name: 问题反馈
+description: 报告可复现的问题，请勿提交私人聊天或登录资料
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本、Windows 版本与屏幕缩放
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤与受影响模型
+      description: 请用不涉及隐私的示例说明预期结果与实际结果。
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私检查
+      options:
+        - label: 我已检查内容，不包含密钥、Cookie、私人聊天、登录资料或未脱敏诊断。
+          required: true

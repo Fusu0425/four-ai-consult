@@ -1,0 +1,22 @@
+[project]
+name = "four-ai-consult"
+version = "0.7.5"
+description = "A Windows desktop workspace for independent multi-model consultation."
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "keyring>=25,<26",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = ["main_v1.py", "main_v2.py", "main_v3.py", "main_v3_consult.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
