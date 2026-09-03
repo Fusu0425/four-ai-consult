@@ -1,12 +1,17 @@
-"""Collect build-environment notices and embedded Chromium credits for release QA."""
+"""Collect build-environment notices; optionally snapshot official Qt attributions."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata as metadata
 import json
+import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.request import urlopen
 
 
 def collect(destination: Path):
@@ -37,39 +42,80 @@ def collect(destination: Path):
     }, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def chromium_credits(destination: Path):
-    from PySide6.QtCore import QTimer, QUrl
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-    from PySide6.QtWidgets import QApplication
+class PageText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip = 0
 
-    app = QApplication.instance() or QApplication([])
-    profile = QWebEngineProfile(app)  # off-the-record, no user profile
-    page = QWebEnginePage(profile, app)
-    success = []
+    def handle_starttag(self, tag, attrs):
+        if tag in {'script', 'style'}:
+            self.skip += 1
+        if tag in {'p', 'div', 'br', 'pre', 'h1', 'h2', 'h3', 'tr', 'li'}:
+            self.parts.append('\n')
 
-    def save(html):
-        if len(html) > 10000 and 'license' in html.lower():
-            (destination / 'CHROMIUM-CREDITS.html').write_text(html, encoding='utf-8')
-            success.append(True)
-        app.quit()
+    def handle_endtag(self, tag):
+        if tag in {'script', 'style'} and self.skip:
+            self.skip -= 1
 
-    page.loadFinished.connect(lambda ok: page.toHtml(save) if ok else app.quit())
-    page.load(QUrl('chrome://credits'))
-    QTimer.singleShot(25000, app.quit)
-    app.exec()
-    page.deleteLater()
-    app.processEvents()
-    if not success:
-        raise RuntimeError('Embedded Chromium credits could not be collected')
+    def handle_data(self, data):
+        if not self.skip:
+            self.parts.append(data)
+
+
+def qt_notices(destination: Path):
+    from PySide6.QtCore import qVersion
+
+    version = qVersion()
+    base = 'https://doc.qt.io/qt-6/'
+
+    def fetch(url):
+        with urlopen(url, timeout=30) as response:
+            return response.read()
+
+    index = fetch(base + 'licenses-used-in-qt.html').decode('utf-8')
+    if f'Qt {version}' not in index:
+        raise RuntimeError('Qt documentation version does not match the build; use a reviewed matching snapshot')
+    # Superset: preserve all attributions in this official release, including
+    # notices for modules that may not be present in our smaller desktop bundle.
+    names = sorted(set(re.findall(r'href="([^"/#]*(?:-attribution-|-3rdparty-)[^"/#]+\.html)"', index)))
+    if len(names) < 50:
+        raise RuntimeError('Incomplete Qt attribution index')
+    folder = destination / ('qt-' + version)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def save(name):
+        url = base + name
+        data = fetch(url)
+        page = PageText()
+        page.feed(data.decode('utf-8'))
+        text = ''.join(page.parts)
+        if len(text) < 500:
+            raise RuntimeError('Incomplete attribution: ' + name)
+        target = folder / (name.removesuffix('.html') + '.txt')
+        target.write_text('Official source: ' + url + '\n\n' + text, encoding='utf-8')
+        return {'url': url, 'sha256': hashlib.sha256(data).hexdigest(), 'file': target.name}
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        inventory = list(pool.map(save, names))
+    for name in ('LGPL-3.0-only.txt', 'GPL-3.0-only.txt', 'GPL-2.0-only.txt', 'LGPL-2.0-or-later.txt'):
+        url = f'https://raw.githubusercontent.com/qt/qtwebengine/v{version}/LICENSES/{name}'
+        data = fetch(url)
+        (folder / name).write_bytes(data)
+        inventory.append({'url': url, 'sha256': hashlib.sha256(data).hexdigest(), 'file': name})
+    (folder / 'sources.json').write_text(json.dumps(inventory, indent=2), encoding='utf-8')
+    print(f'Collected {len(inventory)} official Qt notice sources for {version}')
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('destination', type=Path)
+    parser.add_argument('--qt-docs', action='store_true', help='Download matching official Qt notices (network required)')
     args = parser.parse_args()
     collect(args.destination)
-    chromium_credits(args.destination)
-    print('Collected dependency inventory and embedded credits; manual license/source review is still required.')
+    if args.qt_docs:
+        qt_notices(args.destination)
+    print('Collected dependency inventory; manual license/source review is still required.')
 
 
 if __name__ == '__main__':

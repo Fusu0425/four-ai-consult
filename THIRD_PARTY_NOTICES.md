@@ -12,6 +12,15 @@
 
 ## 二进制发行要求
 
-运行 `tools.collect_licenses` 收集对应构建环境的版本清单、Python 发行物声明和实际 WebEngine 内嵌 Chromium credits。此自动收集不能代替人工核对：本机部分 Qt wheel 仅附商业条款文本，必须补齐实际采用的开源许可、版权声明及对应版本源码获取材料，才能公开发行新的二进制包。
+发行包的 `licenses` 目录保存对应构建环境的版本清单、Python 发行物声明及 Qt 6.11.2 官方第三方声明快照（包括 Chromium）。Qt 声明是上游全集，包含本应用并未使用的部分模块，不表示应用启用了所有组件。`sources.json` 记录原始来源和下载内容哈希。自动收集不能代替人工核对。
+
+源码可从以下上游位置免费取得，与此次未修改的动态库版本对应：
+
+- [Qt 6.11.2 全部模块源码目录](https://download.qt.io/official_releases/qt/6.11/6.11.2/submodules/)，包括 qtbase、qtdeclarative、qtshadertools、qtsvg、qtwebchannel、qtwebengine。
+- [Qt Base 6.11.2 源码](https://download.qt.io/official_releases/qt/6.11/6.11.2/submodules/qtbase-everywhere-src-6.11.2.tar.xz)。
+- [Qt WebEngine 6.11.2 源码（含 Chromium）](https://download.qt.io/official_releases/qt/6.11/6.11.2/submodules/qtwebengine-everywhere-src-6.11.2.tar.xz)。
+- [PySide / Shiboken 6.11.2 源码](https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.2-src/pyside-setup-everywhere-src-6.11.2.tar.xz)。
+
+Qt 构建说明：https://doc.qt.io/qt-6/build-sources.html 。PySide 构建说明：https://doc.qt.io/qtforpython-6/building_from_source/windows.html 。若上述对应源码无法取得，请通过仓库 Issue 报告失效链接。
 
 采用 LGPL 的动态库必须允许接收者依许可修改、替换和为调试修改而进行逆向工程；本项目不对这些权利另加限制。应用完整源码及构建步骤公开，但这不代替第三方库本身的对应源码要求。不要把本页当成已完成所有二进制分发义务的证明。

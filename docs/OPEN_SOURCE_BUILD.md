@@ -18,6 +18,6 @@ $env:PYTHONIOENCODING='utf-8'
 .\.venv-packaging\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp .test-temp-local
 ```
 
-不设置 `RUN_QT_WEBENGINE_TESTS` 时部分测试会跳过。测试后打开新的 PowerShell，再运行 `packaging\build.ps1`。构建会清理项目内对应生成目录，不要在 dist 中保存个人文件。
+不设置 `RUN_QT_WEBENGINE_TESTS` 时部分测试会跳过。测试后打开新的 PowerShell，先运行 `.\.venv-packaging\Scripts\python.exe -m tools.collect_licenses licenses --qt-docs` 获取匹配版本的许可材料（需要网络），核对后再运行 `packaging\build.ps1`。构建会清理项目内对应生成目录，不要在 dist 中保存个人文件。
 
 发布前阅读发行检查表并核对第三方组件许可。依赖使用版本范围，当前构建不是逐字节可复现构建；发行时应保存确切依赖版本及对应源码获取说明。

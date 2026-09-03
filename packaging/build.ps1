@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [string]$LicenseDirectory
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,10 @@ $buildOutput = Join-Path $projectRoot "dist\FourAIConsult"
 $buildWork = Join-Path $projectRoot "build\pyinstaller"
 $specOutput = Join-Path $projectRoot "build\pyinstaller-spec"
 $testTemp = Join-Path $projectRoot (".test-temp-build-" + $PID)
+if (-not $LicenseDirectory) { $LicenseDirectory = Join-Path $projectRoot "licenses" }
+if (-not (Test-Path -LiteralPath (Join-Path $LicenseDirectory "qt-6.11.2\sources.json"))) {
+    throw "Missing reviewed Qt notice snapshot. Run tools.collect_licenses licenses --qt-docs and review before packaging."
+}
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {
     throw "Missing clean release environment: $packagingPython"
@@ -57,6 +62,7 @@ try {
     & $pythonExe -m PyInstaller `
         --noconfirm `
         --clean `
+        --additional-hooks-dir (Join-Path $PSScriptRoot "hooks") `
         --windowed `
         --name FourAIConsult `
         --icon (Join-Path $projectRoot "resources\four-ai-consult.ico") `
@@ -84,6 +90,10 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "开始使用.html") -Destination $buildOutput
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "内测说明.txt") -Destination $buildOutput
+    foreach ($notice in @("LICENSE", "THIRD_PARTY_NOTICES.md", "PRIVACY.md", "SECURITY.md")) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot $notice) -Destination $buildOutput
+    }
+    Copy-Item -LiteralPath $LicenseDirectory -Destination (Join-Path $buildOutput "licenses") -Recurse
     & $pythonExe -m tools.release_audit $buildOutput --prepare
     if ($LASTEXITCODE -ne 0) { throw "Release directory audit failed" }
     if (Test-Path -LiteralPath $portableArchive) {

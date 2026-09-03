@@ -12,7 +12,11 @@ from four_ai_consult import __version__
 
 FORBIDDEN_DIRS = {"browser-profile", "logs", "reports", "screenshots", ".git", ".venv", ".venv-packaging", ".smoke-data"}
 FORBIDDEN_NAMES = {".env", "cookies", "login data", "settings.ini", "application.lock", "startup-error.log", "debug_dom.txt"}
-TOP_LEVEL = {"FourAIConsult.exe", "_internal", "开始使用.html", "内测说明.txt", "release-info.json"}
+REQUIRED_FILES = ("FourAIConsult.exe", "开始使用.html", "内测说明.txt", "release-info.json",
+                  "LICENSE", "THIRD_PARTY_NOTICES.md", "PRIVACY.md", "SECURITY.md",
+                  "licenses/build-environment.json", "licenses/qt-6.11.2/sources.json",
+                  "licenses/qt-6.11.2/LGPL-3.0-only.txt", "licenses/qt-6.11.2/GPL-3.0-only.txt")
+TOP_LEVEL = {"_internal", "licenses", *(name.split('/')[0] for name in REQUIRED_FILES)}
 
 
 def validate_entries(names):
@@ -24,12 +28,15 @@ def validate_entries(names):
         if path.is_absolute() or ".." in parts or ":" in name or not parts or parts[0] not in TOP_LEVEL:
             raise ValueError(f"Unexpected release path: {name}")
         lower = [p.lower() for p in parts]
+        if ('_internal/pyside6/qml/' in name.lower() or 'qmltooling' in lower
+                or re.match(r'qt6(?:charts|graphs|datavisualization|virtualkeyboard|quick3d)', lower[-1])):
+            raise ValueError(f"Unused QML-only component must not enter the Widgets release: {name}")
         if any(p in FORBIDDEN_DIRS for p in lower) or lower[-1] in FORBIDDEN_NAMES:
             raise ValueError(f"Private/development data in release: {name}")
         if re.search(r"\.(sqlite3?|db)(-wal|-shm)?$", lower[-1]) or lower[-1].endswith(".log"):
             raise ValueError(f"Runtime data in release: {name}")
         normalized.append(name)
-    for required in ("FourAIConsult.exe", "开始使用.html", "内测说明.txt", "release-info.json"):
+    for required in REQUIRED_FILES:
         if required not in normalized:
             raise ValueError(f"Missing required release file: {required}")
     if not any(n.endswith("/QtWebEngineProcess.exe") for n in normalized):
