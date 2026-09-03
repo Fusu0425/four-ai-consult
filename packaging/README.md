@@ -34,3 +34,9 @@ To create the installer, install Inno Setup 6 and compile
 `packaging\installer.iss` after the portable build succeeds. Production releases
 should be code-signed. The target machine must have the current Microsoft Visual
 C++ 2015-2022 Redistributable required by Qt WebEngine.
+
+For a small invitation pilot where a tester cannot open ZIP files, run
+`packaging\build-onefile.ps1`. It produces one self-extracting EXE and a SHA256
+sidecar under `dist\onefile`. Startup is slower because Qt WebEngine is unpacked
+into a temporary directory for each run; persistent user data still stays in
+`%LOCALAPPDATA%\FourAIConsult`.

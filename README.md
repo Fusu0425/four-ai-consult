@@ -8,7 +8,7 @@ Windows 桌面应用，从 DeepSeek、Kimi、豆包、通义千问、腾讯元�
 
 ## 下载与使用
 
-在 [Releases](https://github.com/Fusu0425/four-ai-consult/releases) 下载 `FourAIConsult-版本号-portable.zip`（不是自动生成的 Source code.zip）。完整解压，保留 `_internal` 文件夹，双击 `FourAIConsult.exe`。Windows x64 用户不必安装 Python，但须使用自己的账号登录各模型网站。发布准备期间如果没有附件，请等待测试包，不要把源码压缩包当安装包。
+在 [Releases](https://github.com/Fusu0425/four-ai-consult/releases) 优先下载 `FourAIConsult-版本号-onefile.exe`：它不需要解压软件，双击即可启动，首次打开会比便携 ZIP 慢一些。熟悉压缩包的用户也可下载 `FourAIConsult-版本号-portable.zip`，完整解压并保留 `_internal` 文件夹后运行。两种版本都不需要安装 Python，但都须使用自己的账号登录模型网站。GitHub 自动生成的 Source code.zip 不是可运行程序。
 
 1. 首次启动完成引导，确认四家网站均已登录并能独立聊天。
 2. 输入适合比较的问题，例如两套学习计划的取舍；开始会诊。
