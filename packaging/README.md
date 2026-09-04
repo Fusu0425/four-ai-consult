@@ -15,7 +15,7 @@ native libraries from entering the app. The script also removes incompatible ICU
 files injected by the Codex host runtime and verifies that none remain.
 
 The build creates both `dist\FourAIConsult` and the shareable
-`dist\FourAIConsult-0.7.6-portable.zip`. Run
+`dist\FourAIConsult-0.7.7-portable.zip`. Run
 `dist\FourAIConsult\FourAIConsult.exe` to smoke-test it. Test users can extract
 the archive and launch the same executable without installing Python.
 

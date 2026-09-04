@@ -151,6 +151,42 @@ def test_thinking_only_hidden_old_stop_and_same_length_middle_edits(capture_pane
 
 
 @qt
+def test_zhipu_thought_finished_marker_completes_without_labelled_action_button(
+    capture_pane, monkeypatch,
+):
+    """ChatGLM now renders icon-only actions but exposes 思考结束 beside the final body."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    pane, clock, results = capture_pane
+    _set_html(pane.page, '''<textarea></textarea>
+      <div data-message-role="assistant" class="row-answer-0" id="old">
+        <div>思考结束</div><div class="markdown-body">旧回答</div></div>
+      <div data-message-role="assistant" class="row-answer-1" id="current">
+        <div class="reasoning">正在思考中，先查询资料。</div>
+        <div class="markdown-body">当前回答第一段。</div>
+        <button id="stop" aria-label="停止生成"></button></div>''')
+    for seconds in [1, 4, 8]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert not snapshot["completed"]
+        assert snapshot["generating"]
+        assert not results
+
+    _run_js(pane.page, '''document.querySelector('#stop').remove();
+      document.querySelector('#current .reasoning').textContent='思考结束';
+      document.querySelector('#current .markdown-body').textContent=
+        '当前完整正文，包含最后的限制条件。';
+      const icon=document.createElement('button');
+      icon.innerHTML='<svg></svg>';document.querySelector('#current').append(icon);''')
+    for seconds in [10, 12, 14, 16]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+    assert snapshot["completed"]
+    assert not snapshot["generating"]
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
+    assert "当前完整正文，包含最后的限制条件。" in results[0].text
+
+
+@qt
 def test_timeout_then_explicit_recapture_does_not_resend(capture_pane, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
     from test_adapter_javascript import _run_js, _set_html

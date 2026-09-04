@@ -1,6 +1,6 @@
 [project]
 name = "four-ai-consult"
-version = "0.7.6"
+version = "0.7.7"
 description = "A Windows desktop workspace for independent multi-model consultation."
 requires-python = ">=3.10"
 dependencies = [

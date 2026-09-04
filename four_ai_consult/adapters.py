@@ -20,6 +20,7 @@ class SiteAdapter:
     stop_selectors: tuple[str, ...]
     native_input: bool = False
     require_completion_evidence: bool = False
+    completion_markers: tuple[str, ...] = ()
 
     def snapshot_script(self) -> str:
         config = json.dumps(
@@ -27,6 +28,7 @@ class SiteAdapter:
                 "input": self.input_selectors,
                 "assistant": self.assistant_selectors,
                 "stop": self.stop_selectors,
+                "completionMarkers": self.completion_markers,
             },
             ensure_ascii=False,
         )
@@ -183,8 +185,10 @@ _SNAPSHOT_SCRIPT = r"""
   }
   const controls = scope ? Array.from(scope.querySelectorAll('button,[role="button"],[title],[aria-label]')) : [];
   const label = el => [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' ').trim();
+  const completionText = clean(scope?.textContent || latest?.el?.textContent || '');
   const completed = controls.some(el => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
-    /重新生成|重新回答|再次生成|regenerate|retry response/i.test(label(el)));
+    /重新生成|重新回答|再次生成|regenerate|retry response/i.test(label(el))) ||
+    (cfg.completionMarkers || []).some(marker => completionText.includes(marker));
   const activeControls = all(['button','[role="button"]']).some(el => visible(el) &&
     [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].some(value =>
       /^(停止(生成|回答|输出)?|stop( generating| generation| response)?)$/i.test((value || '').trim())));
@@ -429,98 +433,7 @@ SITE_ADAPTERS: tuple[SiteAdapter, ...] = (
         send_selectors=(
             ".send-button-container:not(.disabled)",
             "button[data-testid*='send']",
-            "[class*='send-button']",
-            "button[aria-label*='发送']",
-            "button[aria-label*='Send']",
-        ),
-        assistant_selectors=(
-            ".segment-assistant .markdown",
-            ".segment-assistant",
-            "[data-testid*='assistant']",
-            "[class*='assistant-content']",
-            "[class*='assistant-message']",
-            "[data-role='assistant']",
-        ),
-        stop_selectors=("button[aria-label*='停止']", "[class*='stop-button']", "[data-testid*='stop']"),
-        # Kimi's controlled editor is not reliably compatible with bulk
-        # execCommand insertion. Use the verified trusted-event path, retaining
-        # full input equality checks before Enter (including long report prompts).
-        native_input=True,
-    ),
-    SiteAdapter(
-        id="doubao",
-        name="豆包",
-        home_url="https://www.doubao.com/chat/",
-        input_selectors=(
-            "[data-testid*='chat_input'] [contenteditable='true']",
-            "div.tiptap.ProseMirror[contenteditable='true']",
-            "div.tiptap.ProseMirror",
-            "[role='textbox'][contenteditable='true']",
-            "[contenteditable='true']",
-        ),
-        send_selectors=(
-            "#flow-end-msg-send",
-            "[data-testid='chat_input_send_button']",
-            "button[aria-label*='发送']",
-            "[class*='send-btn']",
-            "button[type='submit']",
-        ),
-        assistant_selectors=(
-            ".flow-markdown-body",
-            "div[class*='max-w-(--content-max-width)']:not(:has([class*='bg-g-send-msg-bubble-bg']))",
-            "[data-testid*='assistant']",
-            "[data-testid*='receive_message']",
-            "[data-testid*='assistant'] [class*='markdown']",
-            "[class*='assistant-message']",
-            "[data-role='assistant']",
-        ),
-        stop_selectors=("button[aria-label*='停止']", "[data-testid*='stop']", "[class*='stop-btn']"),
-    ),
-    SiteAdapter(
-        id="qwen",
-        name="通义千问",
-        home_url="https://www.qianwen.com/",
-        input_selectors=(
-            "[contenteditable='true'][data-placeholder]",
-            "[role='textbox'][contenteditable='true']",
-            "div[contenteditable='true']",
-            "textarea",
-        ),
-        send_selectors=(
-            "button.send-button[aria-label='Send']",
-            ".message-input-right-button-send button.send-button",
-            "button[type='submit']",
-            "[data-testid*='send']",
-            "button[aria-label*='发送']",
-            "button[aria-label*='Send']",
-            "[class*='send-button']",
-        ),
-        assistant_selectors=(
-            "[data-message-role='assistant']",
-            "[data-message-author-role='assistant']",
-            "[data-role='assistant']",
-            "[data-testid*='assistant']",
-            "[class*='message-select-wrapper-answer']",
-            ".markdown-pc-special-class",
-            "#qk-markdown-react",
-            ".qk-markdown",
-            ".markdown-body",
-            "[class*='message-list'] > *",
-            "[class*='message-content']",
-            "[class*='answer-content']",
-            "[class*='assistant'] [class*='markdown']",
-        ),
-        stop_selectors=("button[aria-label*='停止']", "[data-testid*='stop']", "[class*='stop-button']"),
-        # Qwen's controlled editor deliberately ignores synthetic DOM input.
-        # Feed it trusted Qt key events so its internal state and send button update.
-        native_input=True,
-    ),
-    SiteAdapter(
-        id="yuanbao",
-        name="腾讯元宝",
-        home_url="https://yuanbao.tencent.com/",
-        input_selectors=(
-            "#search-bar .ql-editor[contenteditable='true']",
+            "[class*='send-button'uۍm�G����ƭy�ue']",
             ".agent-input-text-area .ql-editor[contenteditable='true']",
             ".ql-editor[contenteditable='true'][data-placeholder]",
             "[role='textbox'][contenteditable='true']",
@@ -584,6 +497,7 @@ SITE_ADAPTERS: tuple[SiteAdapter, ...] = (
             "[class*='stop-btn']",
         ),
         native_input=True,
+        completion_markers=("思考结束",),
     ),
 )
 
