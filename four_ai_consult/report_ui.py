@@ -4,7 +4,7 @@ import copy
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, Qt, Signal
 from PySide6.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 from .adapters import ADAPTER_BY_ID, SITE_ADAPTERS
 from .analysis_plan import AnalysisPlan, ReportRecord, material_fingerprint
 from .config import AppConfig, SecretStore
+from .experience import report_stage_label
+from .report_export import HTML_FILTER, source_targets_for_record, write_report_export
 from .synthesis import DEEPSEEK_MODEL, SynthesisClient
 from .web_synthesis import WebSynthesisDialog
 
@@ -63,6 +65,8 @@ class SafeReportBrowser(QTextBrowser):
 
 
 class ReportDialog(QDialog):
+    report_completed = Signal()
+
     def __init__(
         self,
         basic_report: str,
@@ -94,7 +98,7 @@ class ReportDialog(QDialog):
         self.api.progress.connect(self._progress)
         self.api.checkpoint.connect(self._checkpoint)
         self.api.finished.connect(self._finished)
-        self.setWindowTitle("会诊报告 · 完整观点与比较")
+        self.setWindowTitle("完整对比报告 · 完整观点与原文")
         self.setObjectName("reportDialog")
         screen = QApplication.primaryScreen()
         area = screen.availableGeometry() if screen else None
@@ -103,7 +107,7 @@ class ReportDialog(QDialog):
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
-        title = QLabel("会诊报告")
+        title = QLabel("完整对比报告")
         title.setObjectName("reportTitle")
         root.addWidget(title)
         hint = QLabel("先读完整回答，再看有依据的比较。阅读排版不删字，采集文本与完整导出始终保留。")
@@ -164,7 +168,8 @@ class ReportDialog(QDialog):
         previous = QPushButton("上一页")
         following = QPushButton("下一页")
         self.page_label = QLabel()
-        export = QPushButton("导出完整报告")
+        export = QPushButton("导出 / 分享…")
+        export.setToolTip("推荐导出网页报告，手机打开排版更舒适；也可选择 Markdown 便于编辑。")
         copy_button = QPushButton("复制当前内容")
         previous.clicked.connect(lambda: self._move_page(-1))
         following.clicked.connect(lambda: self._move_page(1))
@@ -334,7 +339,7 @@ class ReportDialog(QDialog):
         self._filter_pages()
         if self.record:
             labels = {
-                "complete": "综合已生成；建议核对关键依据",
+                "complete": "完整对比报告已生成 · 建议核对关键依据",
                 "error": "未完成 · 可保留进度重试",
                 "cancelled": "已停止 · 已完成详析保留",
                 "running": "正在分析",
@@ -344,6 +349,7 @@ class ReportDialog(QDialog):
                 labels.get(self.record.status, self.record.status)
                 + (" · 直接读取完整原文" if self.record.direct else
                    f" · 已详析 {len(self.record.notes)}/{len(self.record.sources)} 段")
+                + (f" · 自动补全 {len(self.record.repair_events)} 次" if self.record.repair_events else "")
                 + (f" · {self.record.error}" if self.record.error else "")
             )
             self.generate.setText("重新生成" if self.record.status == "complete" else
@@ -462,7 +468,7 @@ class ReportDialog(QDialog):
         notice = (
             f"将把本轮完整问题、各家回答和逐段分析发送给 {self.provider.currentText()}。\n\n"
             f"预计至少 {requests} 次请求；常规材料直接对比，长材料分篇处理。原文不删减。\n"
-            "格式失败时同一通道自动重试一次，可能增加请求；不自动更换服务商。\n\n"
+            "标题、完成标记等小格式差异会在本机直接验收；仅在内容缺失时同一通道自动补全一次。\n\n"
             + (
                 "使用你已登录的网页账号，不调用付费 API；仍受网站额度和规则限制。"
                 "将打开临时综合窗口；登录或验证码需要你手动完成。"
@@ -484,6 +490,7 @@ class ReportDialog(QDialog):
                     return
         self.record = plan.record
         self._set_busy(True)
+        self.status.setText("正在整理已收集的完整原文……")
         if free:
             QApplication.instance().setProperty("web_report_busy", True)
             if self.web_runner:
@@ -498,7 +505,7 @@ class ReportDialog(QDialog):
             self.api.ask(key, plan, provider)
 
     def _progress(self, text):
-        self.status.setText(text)
+        self.status.setText(report_stage_label(text) + "……")
 
     def _checkpoint(self, payload):
         self.record = ReportRecord.from_json(payload)
@@ -530,6 +537,9 @@ class ReportDialog(QDialog):
         if self.record and self.record.status == "complete":
             self.sections.setCurrentIndex(0)
             self.navigation.setCurrentRow(0)
+            repair = f" · 自动补全 {len(self.record.repair_events)} 次" if self.record.repair_events else ""
+            self.status.setText("完整对比报告已生成" + repair + " · 建议核对关键依据")
+            self.report_completed.emit()
 
     def stop_analysis(self):
         if self.api.running:
@@ -544,12 +554,19 @@ class ReportDialog(QDialog):
 
     def save_current(self):
         text = self.record.markdown() if self.record else self.basic_report
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出全部页面和原文", str(self.report_dir / "完整会诊报告.md"), "Markdown (*.md)"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出完整对比报告", str(self.report_dir / "完整对比报告.html"), HTML_FILTER
         )
         if path:
             try:
-                Path(path).write_text(text, encoding="utf-8")
+                targets = source_targets_for_record(self.record) if self.record else {}
+                write_report_export(
+                    path,
+                    selected_filter,
+                    text,
+                    question=self.session.question if self.session else "",
+                    source_targets=targets,
+                )
             except OSError as error:
                 QMessageBox.warning(self, "导出失败", str(error))
 

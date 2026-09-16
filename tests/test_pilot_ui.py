@@ -21,11 +21,17 @@ def test_six_readiness_checks_do_not_return_private_text(tmp_path):
     try:
         for adapter in SITE_ADAPTERS:
             _set_html(page, HTML_BY_SITE[adapter.id])
-            assert json.loads(_run_js(page, adapter.readiness_script())) == {"ok": True, "inputAvailable": True}
+            assert json.loads(_run_js(page, adapter.readiness_script())) == {
+                "ok": True, "inputAvailable": True, "loginRequired": False,
+            }
             _run_js(page, "document.querySelectorAll('textarea,input,[contenteditable]').forEach(e=>e.style.display='none')")
-            assert json.loads(_run_js(page, adapter.readiness_script())) == {"ok": True, "inputAvailable": False}
+            assert json.loads(_run_js(page, adapter.readiness_script())) == {
+                "ok": True, "inputAvailable": False, "loginRequired": False,
+            }
         _set_html(page, '<textarea disabled>sk-private</textarea>')
-        assert json.loads(_run_js(page, SITE_ADAPTERS[0].readiness_script())) == {"ok": True, "inputAvailable": False}
+        assert json.loads(_run_js(page, SITE_ADAPTERS[0].readiness_script())) == {
+            "ok": True, "inputAvailable": False, "loginRequired": False,
+        }
     finally:
         delete(page)
         delete(profile)
@@ -48,7 +54,10 @@ def test_main_window_four_way_partial_failure_history_report_and_help(tmp_path, 
 
     monkeypatch.setenv("FOUR_AI_DATA_DIR", str(tmp_path))
     dirs = ensure_runtime_dirs()
-    local_settings(tmp_path).setValue("onboarding_completed", True)
+    settings = local_settings(tmp_path)
+    settings.setValue("onboarding_completed", True)
+    settings.setValue("pending_question", "上次未发送的问题")
+    settings.sync()
     monkeypatch.setattr(ui, "ADAPTER_BY_ID", mock_adapters(ui.ADAPTER_BY_ID))
     monkeypatch.setattr(ui.MainWindow, "_setup_tray", lambda _: None)
     app = QApplication.instance() or QApplication([])
@@ -69,13 +78,19 @@ def test_main_window_four_way_partial_failure_history_report_and_help(tmp_path, 
 
     try:
         window.show()
+        assert window.question_input.text() == "上次未发送的问题"
         wait_until(lambda: all(p.state == PaneState.READY for p in window.panes))
         # Simulate one inaccessible provider. Other providers should still work.
         _run_js(window.panes_by_id["deepseek"].page, "document.querySelector('textarea').remove()")
         window.question_input.setText("公开验收：比较两种方案，保留末尾条件")
+        window._save_draft()
+        assert window.settings.value("pending_question") == "公开验收：比较两种方案，保留末尾条件"
         window.broadcast()
+        assert window.settings.value("pending_question") is None
         wait_until(lambda: window.session is not None and window.session.complete)
         assert len(window.session.successful_results) == 3
+        assert "本轮完成" in window.progress_label.text()
+        assert window.report_button.text() == "查看报告"
         assert window.session.results["deepseek"].state == PaneState.ERROR
         reloaded = ConsultationRepository(dirs["database"]).load_session(window.session.id)
         assert len(reloaded.results) == 4

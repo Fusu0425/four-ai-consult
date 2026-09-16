@@ -59,6 +59,7 @@ def ensure_runtime_dirs() -> dict[str, Path]:
 class AppConfig:
     poll_interval_ms: int = 1200
     response_timeout_seconds: int = 240
+    completion_grace_seconds: int = 18
     stable_poll_count: int = 3
     design_width: int = 1000
     auto_zoom_min: float = 0.50

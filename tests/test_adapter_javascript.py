@@ -42,6 +42,7 @@ HTML_BY_SITE = {
             <div class="markdown-pc-special-class">
               <div id="qk-markdown-react" class="qk-markdown">Qwen fixture answer</div>
             </div>
+            <div class="message-footer-fixture">unrelated follow-up prompt</div>
           </div>
         </div>
     """,
@@ -117,6 +118,37 @@ def test_all_site_adapters_can_send_and_extract_fixture_answers(tmp_path) -> Non
             assert "unrelated suggestion" not in snapshot["text"]
         if adapter.id == "qwen":
             assert snapshot["text"] == "Qwen fixture answer"
+
+    delete(page)
+    delete(profile)
+    app.processEvents()
+
+
+def test_qwen_extracts_only_latest_answer_from_conversation_wrapper(tmp_path) -> None:
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile("qwen-latest-answer", app)
+    profile.setPersistentStoragePath(str(tmp_path / "profile"))
+    page = QWebEnginePage(profile)
+    _set_html(page, """
+      <div contenteditable="true" data-placeholder="输入问题"></div>
+      <div class="message-list-conversation">
+        <div class="conversation-wrapper">
+          <div class="message-select-wrapper-question">旧问题</div>
+          <div class="message-select-wrapper-answer"><div class="qk-markdown">旧回答不能混入</div></div>
+          <div class="message-select-wrapper-question">今天天气怎么样</div>
+          <div class="message-select-wrapper-answer"><div class="qk-markdown">当前天气回答</div></div>
+        </div>
+      </div>
+    """)
+    snapshot = json.loads(_run_js(page, ADAPTER_BY_ID["qwen"].snapshot_script()))
+    assert snapshot["count"] == 2
+    assert snapshot["text"] == "当前天气回答"
 
     delete(page)
     delete(profile)
@@ -428,6 +460,146 @@ def test_kimi_does_not_capture_user_messages_as_answers(tmp_path):
         app.processEvents()
 
 
+def test_kimi_extracts_only_visible_final_answer_not_reasoning_or_hidden_translation(tmp_path):
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    page = QWebEnginePage(profile)
+    try:
+        _set_html(page, '''
+          <style>.hidden-translation { display: none; }</style>
+          <div class="segment-assistant">
+            <div class="thinking">English chain of thought must not be exported.</div>
+            <div data-testid="search-process">Search the web and compare evidence.</div>
+            <div class="markdown-container toolcall-content-text">Internal tool reasoning in English.</div>
+            <div class="markdown"><h2>结论</h2><p>这是应当进入报告的中文完整回答。</p></div>
+            <div class="hidden-translation">This hidden English translation must not appear.</div>
+            <button><svg></svg></button>
+          </div>
+        ''')
+        snapshot = json.loads(_run_js(page, ADAPTER_BY_ID["kimi"].snapshot_script()))
+        assert "这是应当进入报告的中文完整回答" in snapshot["text"]
+        assert "English chain of thought" not in snapshot["text"]
+        assert "Search the web" not in snapshot["text"]
+        assert "Internal tool reasoning" not in snapshot["text"]
+        assert "hidden English translation" not in snapshot["text"]
+    finally:
+        delete(page)
+        delete(profile)
+        app.processEvents()
+
+
+def test_kimi_latest_reasoning_only_root_never_falls_back_to_old_answer(tmp_path):
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    page = QWebEnginePage(profile)
+    try:
+        _set_html(page, '''
+          <div class="segment-assistant"><div class="markdown">上一轮完整回答</div></div>
+          <div class="segment-assistant"><div class="thinking">正在搜索新问题</div></div>
+        ''')
+        snapshot = json.loads(_run_js(page, ADAPTER_BY_ID["kimi"].snapshot_script()))
+        assert snapshot["count"] == 2
+        assert snapshot["text"] == ""
+        assert snapshot["reasoningOnly"]
+    finally:
+        delete(page)
+        delete(profile)
+        app.processEvents()
+
+
+def test_doubao_ignores_editor_user_bubble_and_empty_virtual_rows(tmp_path):
+    """Regression for Doubao's 2026 virtualized message-list DOM."""
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    page = QWebEnginePage(profile)
+    try:
+        _set_html(page, '''
+          <div class="my-0 w-full mx-auto max-w-(--content-max-width)">
+            <textarea>仍在输入框里的问题不是回答</textarea>
+          </div>
+          <div class="my-0 w-full mx-auto max-w-(--content-max-width)">
+            <div class="bg-g-send-msg-bubble-bg">已经发送的用户问题也不是回答</div>
+          </div>
+          <div class="my-0 w-full mx-auto max-w-(--content-max-width)">
+            <section><h2>豆包结论</h2><p>这是完整回答，必须被采集。</p></section>
+          </div>
+          <div class="my-0 w-full mx-auto max-w-(--content-max-width)"></div>
+          <div class="my-0 w-full mx-auto max-w-(--content-max-width)"></div>
+        ''')
+        snapshot = json.loads(_run_js(page, ADAPTER_BY_ID["doubao"].snapshot_script()))
+        assert snapshot["count"] == 1
+        assert "这是完整回答" in snapshot["text"]
+        assert "输入框里的问题" not in snapshot["text"]
+        assert "用户问题也不是回答" not in snapshot["text"]
+    finally:
+        delete(page)
+        delete(profile)
+        app.processEvents()
+
+
+def test_disabled_stop_control_does_not_keep_finished_answer_generating(tmp_path):
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import SiteAdapter
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    page = QWebEnginePage(profile)
+    adapter = SiteAdapter("disabled-stop", "Disabled stop", "about:blank", ("textarea",), ("button",),
+                          (".answer",), (".stop-button",))
+    try:
+        _set_html(page, '<textarea></textarea><div class="answer">完整回答'
+                        '<button class="stop-button disabled" aria-disabled="true"></button></div>')
+        snapshot = json.loads(_run_js(page, adapter.snapshot_script()))
+        assert snapshot["text"] == "完整回答"
+        assert not snapshot["generating"]
+    finally:
+        delete(page)
+        delete(profile)
+        app.processEvents()
+
+
+def test_yuanbao_login_prompt_is_reported_by_snapshot(tmp_path):
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    page = QWebEnginePage(profile)
+    try:
+        _set_html(page, '<div class="ql-editor" contenteditable="true"></div>'
+                        '<button class="agent-dialogue__tool__login">登录</button>')
+        snapshot = json.loads(_run_js(page, ADAPTER_BY_ID["yuanbao"].snapshot_script()))
+        assert snapshot["loginRequired"]
+    finally:
+        delete(page)
+        delete(profile)
+        app.processEvents()
+
+
 @pytest.mark.parametrize("question,truncate", [
     ("回复我：buOK", False),
     (("中文 abc 123\n" * 800) + "最后的必要条件", False),
@@ -503,6 +675,65 @@ def test_kimi_dispatch_uses_verified_native_input(tmp_path, question, truncate):
             assert results[0].text == "完整回答"
             assert _run_js(pane.page, "window.submitted") == question
             assert _run_js(pane.page, "window.submissions") == 1
+    finally:
+        pane.close()
+        delete(pane)
+        delete(profile)
+        app.processEvents()
+
+
+def test_native_input_retypes_once_when_hydrating_editor_drops_an_early_key(tmp_path):
+    from dataclasses import replace
+
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWebEngineCore import QWebEngineProfile
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+    from four_ai_consult.config import AppConfig
+    from four_ai_consult.models import PaneState
+    from four_ai_consult.webpane import WebPane
+
+    app = QApplication.instance() or QApplication([])
+    profile = QWebEngineProfile(app)
+    adapter = replace(ADAPTER_BY_ID["kimi"], home_url="about:blank")
+    pane = WebPane(adapter, profile, AppConfig(poll_interval_ms=50, response_timeout_seconds=10, stable_poll_count=1),
+                   0, 0, lambda _: None)
+    pane.show()
+    question = "自动重试输入成功"
+    try:
+        _set_html(pane.page, '''
+          <div class="chat-input-editor" contenteditable="true"></div>
+          <script>
+            const editor = document.querySelector('.chat-input-editor');
+            window.dropped = false; window.submissions = 0;
+            editor.addEventListener('input', event => {
+              if (event.isTrusted && !window.dropped) {
+                window.dropped = true;
+                editor.textContent = editor.textContent.slice(1);
+              }
+            });
+            editor.addEventListener('keydown', event => {
+              if (event.key !== 'Enter' || event.shiftKey || !event.isTrusted) return;
+              event.preventDefault(); window.submissions++;
+              document.body.insertAdjacentHTML('beforeend',
+                '<div class="segment-assistant"><div class="markdown">自动重试输入成功</div>' +
+                '<button title="重新生成"></button></div>');
+              editor.textContent = '';
+            });
+          </script>
+        ''')
+        results = []
+        loop = QEventLoop()
+        pane.answer_ready.connect(lambda result: (results.append(result), loop.quit()))
+        pane.dispatch(question, "hydration-retry")
+        QTimer.singleShot(12000, loop.quit)
+        loop.exec()
+        assert len(results) == 1
+        assert results[0].state == PaneState.DONE
+        assert _run_js(pane.page, "window.dropped")
+        assert _run_js(pane.page, "window.submissions") == 1
     finally:
         pane.close()
         delete(pane)

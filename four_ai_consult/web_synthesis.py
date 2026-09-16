@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLa
 from .adapters import SiteAdapter
 from .analysis_plan import AnalysisPlan
 from .config import AppConfig
+from .experience import report_stage_label
 from .webpane import WebPane
 
 
@@ -25,6 +26,7 @@ class WebSynthesisDialog(QDialog):
         self.waiting = False
         self.running = False
         self._navigation_id = 0
+        self._repair_notice = ""
         self.setWindowTitle(f"免费网页综合 · {adapter.name}")
         self.resize(900, 680)
         layout = QVBoxLayout(self)
@@ -75,7 +77,11 @@ class WebSynthesisDialog(QDialog):
         self.running = False
         self.waiting = True
         self.continue_button.setEnabled(True)
-        self.status.setText(task.title + "。正在打开独立空白会话；若有验证码，请手动完成。")
+        prefix = self._repair_notice
+        self._repair_notice = ""
+        self.status.setText(
+            prefix + report_stage_label(task.title) + " · 正在准备独立会话；若有验证码，请手动完成。"
+        )
         self._navigation_id += 1
         self.pane.go_home()
 
@@ -116,7 +122,9 @@ class WebSynthesisDialog(QDialog):
                 self.continue_button.setEnabled(False)
                 task = self.plan.pending
                 self.pane.completion_marker = task.marker
-                self.status.setText(task.title + " · 正在发送完整材料和等待分析，请勿操作本页输入框。")
+                self.status.setText(
+                    report_stage_label(task.title) + " · 材料已发送，正在等待完整输出。"
+                )
                 self.pane.dispatch(task.prompt, uuid4().hex)
 
             self.pane._run_javascript(self.pane.adapter.focus_input_script(), focus)
@@ -133,12 +141,13 @@ class WebSynthesisDialog(QDialog):
             self._fail(result.error or "网页未返回完整回答")
             return
         try:
-            self.plan.accept(result.text)
+            self.plan.accept(result.text, allow_completed_without_marker=True)
         except ValueError as error:
             if self.plan.repair(str(error)):
                 self.checkpoint.emit(self.plan.record.to_json())
-                self.status.setText("输出格式未通过检查，保留中间结果并自动重试本步骤一次。")
-                QTimer.singleShot(600, self._next)
+                self._repair_notice = f"上次结果未通过完整性检查：{error} 将自动修复一次（不会循环重试）。\n"
+                self.status.setText(self._repair_notice + "2 秒后开始；已生成内容已保留。")
+                QTimer.singleShot(2000, self._next)
                 return
             self._fail(str(error))
             return

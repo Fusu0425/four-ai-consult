@@ -37,6 +37,38 @@ def test_direct_request_contains_all_original_characters_and_conditions():
         assert "".join(b["text"] for b in data["original_answers"] if b["site_id"] == answer.site_id) == answer.text
 
 
+def test_six_complete_originals_produce_one_traceable_complete_comparison():
+    providers = [
+        ("deepseek", "DeepSeek"), ("kimi", "Kimi"), ("doubao", "豆包"),
+        ("qwen", "通义千问"), ("yuanbao", "腾讯元宝"), ("zhipu", "智谱清言"),
+    ]
+    session = ConsultationSession("六种方案应该如何比较并作出选择？", tuple(site for site, _ in providers))
+    for index, (site, name) in enumerate(providers, 1):
+        session.add_result(AnswerResult(
+            site, name, session.question, PaneState.DONE,
+            text=f"{name} 的完整原文：建议角度 {index}，包含依据、限制条件和风险。" * 5,
+        ))
+    plan = AnalysisPlan(session, "免费网页版", "deepseek")
+    task = plan.next_task()
+    assert task.is_final and len(task.source_ids) == 6
+    citations = " ".join(f"[{source_id}]" for source_id in task.source_ids)
+    report = (
+        "## 先看结论\n应先统一目标与限制，再按成本、风险和可执行性选择。\n"
+        "## 各家怎么回答\n六家原始立场全部逐一说明，不遗漏少数意见。\n"
+        "## 逐项对比\n逐项比较成本、收益、时间、风险、边界和失败条件。\n"
+        "## 共识、分歧与独有观点\n共同点、真正冲突、前提差异和独有观点分别列出。\n"
+        "## 建议与下一步\n先验证关键假设，再根据实际结果决策并保留备选方案。\n"
+        "## 本次来源编号覆盖清单\n" + citations + "\n"
+        + "完整比较内容，保留每家理由、条件、例外和可执行建议。" * 30
+    )
+    plan.accept(report + "\n" + task.marker)
+    assert plan.record.status == "complete"
+    documents = dict(plan.record.documents())
+    assert len([title for title in documents if title.startswith("原文 · ")]) == 6
+    assert all(f"[{source_id}]" in plan.record.conclusion for source_id in task.source_ids)
+    assert plan.record.markdown().startswith("# 完整对比报告")
+
+
 def test_code_closing_fence_is_not_mistaken_for_marker_wrapper():
     plan = AnalysisPlan(material(), "免费网页版", "deepseek")
     task = plan.next_task()

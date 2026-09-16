@@ -59,6 +59,21 @@ def sanitized_diagnostic(raw) -> dict:
                 min(100000, max(-1, row["count"])) for row in rows[:30]
                 if isinstance(row, dict) and type(row.get("count")) is int
             ]
+    capture = raw.get("captureState")
+    if isinstance(capture, dict):
+        safe_capture = {}
+        for key in (
+            "count", "generating", "completed", "completedByMarker", "completionControlCount",
+            "reasoningOnly", "intermediateOnly", "loginRequired", "textLength",
+            "requiresCompletionEvidence", "answerVersions", "stablePolls", "sawGenerating",
+        ):
+            value = capture.get(key)
+            if isinstance(value, bool) or type(value) is int:
+                safe_capture[key] = value
+        reason = capture.get("completionReason")
+        if reason in {"", "waiting", "manual", "marker", "site-control", "observed-lifecycle", "quiet-window"}:
+            safe_capture["completionReason"] = reason
+        result["capture_state"] = safe_capture
     return result
 
 

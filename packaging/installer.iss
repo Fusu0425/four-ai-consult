@@ -1,5 +1,5 @@
 #define MyAppName "四模型会诊"
-#define MyAppVersion "0.7.7"
+#define MyAppVersion "0.7.14"
 #define MyAppPublisher "Four AI Consult"
 #define MyAppExeName "FourAIConsult.exe"
 

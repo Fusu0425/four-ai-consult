@@ -46,4 +46,3 @@ py -3.12 -m venv .venv
 ## 开源许可
 
 本项目原创代码按 [MIT](LICENSE) 许可发布。Python、Qt、Chromium 等第三方组件保留各自许可，不因应用使用 MIT 而改变。详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
-

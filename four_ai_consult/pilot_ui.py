@@ -64,7 +64,7 @@ class PilotCenter(QDialog):
         layout = QVBoxLayout(guide)
         layout.addWidget(paragraph(
             "① 在四个面板分别登录你自己的 AI 账号。放大单个面板更方便登录。\n"
-            "② 写下需要比较的问题，点击「开始会诊」。失败模型可单独重试。\n"
+            "② 写下需要比较的问题，点击「开始会诊」。可边生成边查看，单家可以重试或跳过。\n"
             "③ 在报告里先看「完整回答」，再点击「生成比较报告」，确认材料发送后生成结论。"
         ))
         layout.addWidget(paragraph("网页加载完成不代表已经登录；下面只检查输入框，不发送问题，也不验证剩余额度。"))
@@ -169,7 +169,9 @@ class PilotCenter(QDialog):
             pending.remove(sid)
             data = raw if isinstance(raw, dict) else {}
             text = "无法确认 · 请检查网络、登录或验证码，再重新检查"
-            if data.get("ok") and data.get("inputAvailable"):
+            if data.get("ok") and data.get("loginRequired"):
+                text = "尚未登录 · 请先在该模型面板完成登录"
+            elif data.get("ok") and data.get("inputAvailable"):
                 text = "输入框可用 · 请确认已登录，实际可用性以发送结果为准"
             elif data.get("ok"):
                 text = "未找到可用输入框 · 请登录、等待加载或刷新该面板"

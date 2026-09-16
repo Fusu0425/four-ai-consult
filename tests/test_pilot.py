@@ -109,6 +109,45 @@ def test_diagnostic_drops_urls_text_and_selector_values():
     }
 
 
+def test_diagnostic_keeps_only_safe_capture_lifecycle_evidence():
+    raw = {
+        "url": "https://secret.example/private",
+        "captureState": {
+            "text": "私人回答",
+            "inputText": "私人问题",
+            "signature": "private-hash",
+            "count": 2,
+            "generating": False,
+            "completed": False,
+            "reasoningOnly": False,
+            "intermediateOnly": False,
+            "textLength": 432,
+            "requiresCompletionEvidence": True,
+            "answerVersions": 1,
+            "stablePolls": 8,
+            "sawGenerating": False,
+            "completionReason": "quiet-window",
+            "unknown": "private",
+        },
+    }
+    result = sanitized_diagnostic(raw)
+    assert result["capture_state"] == {
+        "count": 2,
+        "generating": False,
+        "completed": False,
+        "reasoningOnly": False,
+        "intermediateOnly": False,
+        "textLength": 432,
+        "requiresCompletionEvidence": True,
+        "answerVersions": 1,
+        "stablePolls": 8,
+        "sawGenerating": False,
+        "completionReason": "quiet-window",
+    }
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "私人" not in serialized and "secret" not in serialized and "private" not in serialized
+
+
 def test_atomic_json_keeps_previous_on_replace_failure(tmp_path, monkeypatch):
     import four_ai_consult.pilot as pilot
 
@@ -139,6 +178,9 @@ def test_partial_answer_is_saved_before_other_models_finish(tmp_path):
         report_button = SimpleNamespace(setEnabled=lambda _: None)
         report_dialog = None
         _save_session = MainWindow._save_session
+
+        def _update_progress(self):
+            pass
 
     MainWindow._on_answer_ready(Window(), answer)
     stored = ConsultationRepository(tmp_path / "history.sqlite3").load_session(s.id)
@@ -186,3 +228,61 @@ def test_settings_are_isolated_and_persist_in_actual_data_directory(tmp_path, mo
     monkeypatch.setenv("FOUR_AI_DATA_DIR", "relative")
     with pytest.raises(ValueError):
         app_data_dir()
+
+
+def test_stale_staggered_dispatch_cannot_send_into_a_new_session():
+    from four_ai_consult.ui import MainWindow
+
+    calls = []
+    pane = SimpleNamespace(
+        adapter=SimpleNamespace(id="deepseek"),
+        dispatch=lambda question, session_id: calls.append((question, session_id)),
+    )
+    session = ConsultationSession("新问题", ("deepseek",))
+    window = SimpleNamespace(
+        _dispatch_generation=2,
+        _pending_site_ids={"deepseek"},
+        session=session,
+    )
+    MainWindow._dispatch_one(window, pane, "旧问题", "old-session", 1)
+    assert not calls
+    MainWindow._dispatch_one(window, pane, session.question, session.id, 2)
+    assert calls == [("新问题", session.id)]
+    assert not window._pending_site_ids
+
+
+def test_partial_progress_invites_user_to_view_available_results():
+    from four_ai_consult.ui import MainWindow
+
+    session = ConsultationSession("比较", ("deepseek", "kimi", "doubao", "qwen"))
+    session.add_result(AnswerResult("deepseek", "DeepSeek", session.question, PaneState.DONE, text="已完成"))
+
+    class Label:
+        value = ""
+
+        def setText(self, value):
+            self.value = value
+
+    class Button(Label):
+        enabled = False
+
+        def setEnabled(self, value):
+            self.enabled = value
+
+    panes = [
+        SimpleNamespace(adapter=SimpleNamespace(id="deepseek", name="DeepSeek"), state=PaneState.DONE),
+        SimpleNamespace(adapter=SimpleNamespace(id="kimi", name="Kimi"), state=PaneState.GENERATING),
+        SimpleNamespace(adapter=SimpleNamespace(id="doubao", name="豆包"), state=PaneState.SENDING),
+        SimpleNamespace(adapter=SimpleNamespace(id="qwen", name="通义千问"), state=PaneState.READY),
+    ]
+    window = SimpleNamespace(
+        session=session,
+        panes=panes,
+        report_button=Button(),
+        progress_label=Label(),
+    )
+    MainWindow._update_progress(window)
+    assert window.report_button.enabled
+    assert window.report_button.value == "查看已有结果 1/4"
+    assert "可先查看已有结果" in window.progress_label.value
+    assert "Kimi、豆包正在回答" in window.progress_label.value

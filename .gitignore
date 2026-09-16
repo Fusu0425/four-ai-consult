@@ -16,6 +16,7 @@ __pycache__/
 .live-smoke/
 .video-deps/
 .video-runtime/
+licenses/
 marketing/video-validation-01/assets/
 marketing/video-validation-01/output/
 build/

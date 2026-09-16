@@ -76,6 +76,65 @@ def poll_dom(pane, clock, seconds, monkeypatch):
 
 
 @qt
+@pytest.mark.parametrize(
+    "provider,answer_html",
+    [
+        ("deepseek", '<div class="ds-markdown" id="current">'),
+        ("kimi", '<div class="segment-assistant" id="current"><div class="markdown">'),
+        ("doubao", '<div class="my-0 w-full mx-auto max-w-(--content-max-width)" id="current">'),
+        ("qwen", '<div data-message-role="assistant" id="current">'),
+        ("yuanbao", '<div data-role="assistant" id="current">'),
+        ("zhipu", '<div data-message-role="assistant" id="current">'),
+    ],
+)
+def test_all_six_production_adapters_finish_a_streamed_answer(
+    capture_pane, monkeypatch, provider, answer_html,
+):
+    """One shared lifecycle contract must hold for every production adapter."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID[provider], home_url="about:blank")
+    close = "</div></div>" if provider == "kimi" else "</div>"
+    _set_html(pane.page, '<textarea></textarea>' + answer_html +
+              '正在生成第一段。<button class="stop-button" aria-label="停止生成"></button>' + close)
+    for seconds in [1, 3]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert snapshot["generating"]
+        assert not results
+    _run_js(pane.page, "document.querySelector('#current').querySelector('.stop-button').remove();"
+            "document.querySelector('#current').insertAdjacentHTML('beforeend', "
+            "'<p>最终完整回答，包含结论、依据、限制和下一步。</p><button title=重新生成></button>')")
+    for seconds in [5, 7, 9]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+    assert len(results) == 1, provider
+    assert results[0].state == PaneState.DONE
+    assert "最终完整回答" in results[0].text
+
+
+@qt
+def test_yuanbao_visible_login_prompt_finishes_as_login_error(capture_pane, monkeypatch):
+    from test_adapter_javascript import _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID["yuanbao"], home_url="about:blank")
+    _set_html(pane.page, '<div class="ql-editor" contenteditable="true"></div>'
+                         '<button class="agent-dialogue__tool__login">登录</button>')
+    poll_dom(pane, clock, 1, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.ERROR
+    assert "未登录" in results[0].error
+    assert pane.status_label.text() == "需要登录"
+    assert pane.retry_button.text() == "登录后重试"
+    assert not pane.retry_button.isHidden()
+    assert pane.capture_button.isHidden()
+
+
+@qt
 @pytest.mark.parametrize("provider", ["zhipu", "kimi"])
 def test_long_reasoning_pause_streaming_and_final_tail_reach_history_and_report(
     capture_pane, tmp_path, monkeypatch, provider,
@@ -114,7 +173,7 @@ def test_long_reasoning_pause_streaming_and_final_tail_reach_history_and_report(
     assert len(results) == 1
     assert results[0].state == PaneState.DONE
     assert results[0].text.endswith(full)
-    assert "思考过程：先核对条件。" in results[0].text
+    assert "思考过程：先核对条件。" not in results[0].text
     session = ConsultationSession(pane._question, (provider,))
     session.add_result(results[0])
     repo = ConsultationRepository(tmp_path / "complete.sqlite3")
@@ -177,13 +236,201 @@ def test_zhipu_thought_finished_marker_completes_without_labelled_action_button(
         '当前完整正文，包含最后的限制条件。';
       const icon=document.createElement('button');
       icon.innerHTML='<svg></svg>';document.querySelector('#current').append(icon);''')
-    for seconds in [10, 12, 14, 16]:
+    for seconds in [10, 12, 14, 18]:
         snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert not results
+    snapshot = poll_dom(pane, clock, 20, monkeypatch)
     assert snapshot["completed"]
     assert not snapshot["generating"]
     assert len(results) == 1
     assert results[0].state == PaneState.DONE
     assert "当前完整正文，包含最后的限制条件。" in results[0].text
+
+
+@qt
+def test_zhipu_marker_and_unlabelled_stop_icon_wait_through_final_stream(
+    capture_pane, monkeypatch,
+):
+    """A reasoning-finished marker is not enough while the final prose is still changing."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    pane, clock, results = capture_pane
+    _set_html(pane.page, '''<textarea></textarea>
+      <div data-message-role="assistant" id="current">
+        <div class="reasoning">思考结束</div>
+        <div class="markdown-body">最终回答第一段。</div>
+        <button><svg></svg></button></div>''')
+    for seconds in [1, 4, 8]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert snapshot["completed"]
+        assert not snapshot["generating"]
+        assert not results
+
+    _run_js(pane.page, '''document.querySelector('#current .markdown-body').textContent=
+      '最终回答第一段。补充第二段和最后限制条件。';''')
+    for seconds in [9, 12, 16, 18]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+        assert not results
+    poll_dom(pane, clock, 19, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
+    assert results[0].text.endswith("最终回答第一段。补充第二段和最后限制条件。")
+
+
+@qt
+def test_zhipu_unlabelled_icons_and_no_marker_finish_after_stable_stream(
+    capture_pane, monkeypatch,
+):
+    """Current ChatGLM can finish with icon-only actions and no textual marker."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    pane, clock, results = capture_pane
+    _set_html(pane.page, '''<textarea></textarea>
+      <div data-message-role="assistant" id="current">
+        <div class="markdown-body">回答正在形成。</div><button><svg></svg></button></div>''')
+    poll_dom(pane, clock, 1, monkeypatch)
+    _run_js(pane.page, "document.querySelector('.markdown-body').textContent='回答第二阶段，补充依据。'+'甲'.repeat(180)")
+    poll_dom(pane, clock, 3, monkeypatch)
+    _run_js(pane.page, "document.querySelector('.markdown-body').textContent='最终完整回答，含结论、依据和限制。'+'乙'.repeat(220)")
+    for seconds in [5, 10, 18, 22]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert not snapshot["completed"]
+        assert not results
+    poll_dom(pane, clock, 23, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
+    assert results[0].text.startswith("最终完整回答")
+
+
+@qt
+def test_kimi_unlabelled_final_actions_finish_automatically_after_quiet_stream(
+    capture_pane, monkeypatch,
+):
+    """Kimi's completed toolbar may contain only icons with no accessible labels."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID["kimi"], home_url="about:blank")
+    _set_html(pane.page, '''<textarea></textarea>
+      <div class="segment-assistant" id="current">
+        <div class="markdown">回答正在形成。</div>
+        <button><svg></svg></button><button><svg></svg></button><button><svg></svg></button>
+      </div>''')
+    poll_dom(pane, clock, 1, monkeypatch)
+    _run_js(pane.page, "document.querySelector('.markdown').textContent='回答第二阶段，补充依据。'+'甲'.repeat(180)")
+    poll_dom(pane, clock, 3, monkeypatch)
+    _run_js(pane.page, "document.querySelector('.markdown').textContent='最终完整回答，含结论、依据和限制。'+'乙'.repeat(220)")
+    for seconds in [5, 10, 18, 22]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert snapshot["completionControlCount"] == 3
+        assert not results
+    poll_dom(pane, clock, 23, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
+    assert results[0].text.startswith("最终完整回答")
+
+
+@qt
+@pytest.mark.parametrize("provider", ["deepseek", "kimi", "doubao", "qwen", "yuanbao", "zhipu"])
+def test_single_atomic_final_answer_without_site_controls_is_eventually_collected(
+    capture_pane, monkeypatch, provider,
+):
+    """A provider may mount the final answer once and expose only one unlabelled icon."""
+    from test_adapter_javascript import _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID[provider], home_url="about:blank")
+    selectors = {
+        "deepseek": "ds-markdown",
+        "kimi": "segment-assistant",
+        "doubao": "my-0 w-full mx-auto max-w-(--content-max-width)",
+        "qwen": "message-select-wrapper-answer",
+        "yuanbao": "hyc-content-text",
+        "zhipu": "row-answer",
+    }
+    selector = selectors[provider]
+    _set_html(pane.page, f'''<textarea></textarea>
+      <div class="{selector}" data-message-role="assistant" id="current">
+        <div class="markdown markdown-body">一次性挂载的完整回答，包含结论、依据、限制和最后一步。</div>
+        <button><svg></svg></button>
+      </div>''')
+    for seconds in [1, 8, 16, 24]:
+        snapshot = poll_dom(pane, clock, seconds, monkeypatch)
+        assert not snapshot["completed"]
+        assert not snapshot["generating"]
+        assert not results
+    poll_dom(pane, clock, 25, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
+    assert results[0].text.endswith("最后一步。")
+    assert pane._completion_reason == "quiet-window"
+
+
+@qt
+def test_atomic_completion_quiet_window_resets_when_late_tail_arrives(capture_pane, monkeypatch):
+    """No fixed timer may collect before a late final paragraph has also stayed quiet."""
+    from test_adapter_javascript import _run_js, _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID["kimi"], home_url="about:blank")
+    _set_html(pane.page, '''<textarea></textarea><div class="segment-assistant" id="current">
+      <div class="markdown">主体回答。</div><button><svg></svg></button></div>''')
+    for seconds in [1, 12, 23]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+        assert not results
+    _run_js(pane.page, "document.querySelector('.markdown').textContent="
+            "'主体回答。最后补充的限制条件、适用范围、风险提示与下一步行动。'")
+    for seconds in [24, 36, 47]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+        assert not results
+    poll_dom(pane, clock, 49, monkeypatch)
+    assert len(results) == 1
+    assert results[0].text.endswith("最后补充的限制条件、适用范围、风险提示与下一步行动。")
+
+
+@qt
+def test_zhipu_single_long_static_planning_message_is_not_fallback_completion(
+    capture_pane, monkeypatch,
+):
+    from test_adapter_javascript import _set_html
+
+    pane, clock, results = capture_pane
+    _set_html(pane.page, '<textarea></textarea><div data-message-role="assistant">'
+                           '我将先搜索并分析问题。' + '计划内容。' * 80 + '</div>')
+    for seconds in [1, 20, 60, 120]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+    assert pane._answer_version_count == 1
+    assert not results
+
+
+@qt
+def test_finished_report_without_internal_marker_returns_after_short_grace(
+    capture_pane, monkeypatch,
+):
+    """A site's own completion control must beat the old 30-second marker wait."""
+    from dataclasses import replace
+
+    from test_adapter_javascript import _set_html
+
+    from four_ai_consult.adapters import ADAPTER_BY_ID
+
+    pane, clock, results = capture_pane
+    pane.adapter = replace(ADAPTER_BY_ID["deepseek"], home_url="about:blank")
+    pane.completion_marker = "FOURAI_DONE_missing"
+    _set_html(pane.page, '<textarea></textarea><div data-role="assistant">完整对比报告正文'
+                         '<button title="重新生成"></button></div>')
+    for seconds in [1, 3, 5]:
+        poll_dom(pane, clock, seconds, monkeypatch)
+        assert not results
+    poll_dom(pane, clock, 6, monkeypatch)
+    assert len(results) == 1
+    assert results[0].state == PaneState.DONE
 
 
 @qt
@@ -196,11 +443,18 @@ def test_timeout_then_explicit_recapture_does_not_resend(capture_pane, monkeypat
       <button onclick="window.submissions++">发送</button><script>window.submissions=0</script>''')
     poll_dom(pane, clock, 1, monkeypatch)
     poll_dom(pane, clock, 241, monkeypatch)
+    assert not results
+    assert pane.state == PaneState.GENERATING
+    assert "自动复查" in pane.status_label.text()
+    poll_dom(pane, clock, 260, monkeypatch)
     assert results[-1].state == PaneState.ERROR
     assert results[-1].text == "思考草稿"
     assert pane.capture_button.isEnabled()
+    assert pane.capture_button.text() == "确认收录"
+    assert pane.retry_button.isHidden()
     assert "补采" in results[-1].error
-    _run_js(pane.page, "document.querySelector('[data-role=assistant]').textContent='迟到的完整正文，包括最后的限制条件。'")
+    _run_js(pane.page, "document.querySelector('[data-role=assistant]').innerHTML="
+            "'迟到的完整正文，包括最后的限制条件。<button class=stop-button></button>'")
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
     starts = []
     pane.collection_started.connect(starts.append)
@@ -215,6 +469,28 @@ def test_timeout_then_explicit_recapture_does_not_resend(capture_pane, monkeypat
     assert results[-1].text == "迟到的完整正文，包括最后的限制条件。"
     assert _run_js(pane.page, "window.submissions") == 0
     assert _run_js(pane.page, "document.querySelector('textarea').value") == "保留用户草稿"
+
+
+@qt
+def test_polling_adapts_to_thinking_streaming_and_confirmation(capture_pane):
+    pane, _, _ = capture_pane
+    assert pane.config.poll_interval_ms == 1200
+    pane._adapt_poll_interval(False, True)
+    assert pane.poll_timer.interval() == 1500
+    pane._adapt_poll_interval(True, True)
+    assert pane.poll_timer.interval() == 700
+    pane._adapt_poll_interval(True, False)
+    assert pane.poll_timer.interval() == 900
+
+
+@qt
+def test_skip_finishes_only_this_model_with_a_cancelled_result(capture_pane):
+    pane, _, results = capture_pane
+    assert not pane.skip_button.isHidden()
+    pane.skip_button.click()
+    assert len(results) == 1
+    assert results[0].state == PaneState.CANCELLED
+    assert pane.status_label.text() == "已取消"
 
 
 @qt

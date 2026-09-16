@@ -7,7 +7,7 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QInputMethodEvent, QKeyEvent
+from PySide6.QtGui import QColor, QDesktopServices, QInputMethodEvent, QKeyEvent
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget
@@ -62,6 +62,8 @@ class WebPane(QWidget):
         row: int,
         on_fullscreen: Callable[[WebPane], None],
         parent: QWidget | None = None,
+        *,
+        defer_initial_load: bool = False,
     ) -> None:
         super().__init__(parent)
         self.adapter = adapter
@@ -81,6 +83,8 @@ class WebPane(QWidget):
         self._last_signature = ""
         self._last_text = ""
         self._stable_polls = 0
+        self._answer_version_count = 0
+        self._saw_generating = False
         self.completion_marker = ""
         self.require_empty_input = False
         self._last_change_at = 0.0
@@ -88,10 +92,19 @@ class WebPane(QWidget):
         self._last_snapshot: dict[str, object] = {}
         self._manual_capture = False
         self._capture_url = ""
+        self._deadline_at = 0.0
+        self._grace_retry_used = False
+        self._last_error = ""
+        self._pulse_dimmed = False
+        self._completion_reason = ""
+        self._last_logged_phase = ""
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(config.poll_interval_ms)
         self.poll_timer.timeout.connect(self._poll_answer)
+        self.pulse_timer = QTimer(self)
+        self.pulse_timer.setInterval(650)
+        self.pulse_timer.timeout.connect(self._pulse_status_dot)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -110,6 +123,8 @@ class WebPane(QWidget):
         self.status_label.setStyleSheet("color:#8A7A69;")
         self.refresh_button = QPushButton("刷新")
         self.retry_button = QPushButton("重试")
+        self.skip_button = QPushButton("跳过")
+        self.skip_button.setToolTip("停止等待本模型；不会删除已采集内容，也不会操作网站上的生成按钮。")
         self.capture_button = QPushButton("补采")
         self.capture_button.setFixedWidth(44)
         self.capture_button.setToolTip("网页回答已完成但报告缺失？补采当前原文，不重新发送问题。")
@@ -117,11 +132,12 @@ class WebPane(QWidget):
         self.capture_button.setEnabled(False)
         self.full_button = QPushButton("全屏")
         self.more_button = QPushButton("•••")
-        for button in (self.refresh_button, self.retry_button, self.full_button):
+        for button in (self.refresh_button, self.retry_button, self.skip_button, self.full_button):
             button.setFixedWidth(44)
         self.more_button.setFixedWidth(34)
         self.more_button.setToolTip("更多面板操作")
         self.retry_button.hide()
+        self.skip_button.hide()
 
         pane_menu = QMenu(self.more_button)
         home_action = pane_menu.addAction("返回模型主页")
@@ -140,6 +156,7 @@ class WebPane(QWidget):
         bar.addStretch(1)
         bar.addWidget(self.refresh_button)
         bar.addWidget(self.retry_button)
+        bar.addWidget(self.skip_button)
         bar.addWidget(self.capture_button)
         bar.addWidget(self.full_button)
         bar.addWidget(self.more_button)
@@ -150,6 +167,7 @@ class WebPane(QWidget):
 
         self.refresh_button.clicked.connect(self.view.reload)
         self.retry_button.clicked.connect(self.retry)
+        self.skip_button.clicked.connect(lambda: self.cancel())
         self.full_button.clicked.connect(lambda: self.on_fullscreen(self))
         home_action.triggered.connect(self.go_home)
         external_action.triggered.connect(self.open_external)
@@ -162,8 +180,18 @@ class WebPane(QWidget):
 
         root.addWidget(bar_widget)
         root.addWidget(self.view, 1)
-        self._set_state(PaneState.LOADING)
-        self.view.setUrl(QUrl(adapter.home_url))
+        self._set_state(PaneState.LOADING, "正在连接")
+        # Let the application shell paint first, then stagger the four Chromium
+        # navigations to avoid a visible CPU/disk spike during startup.
+        if defer_initial_load:
+            delay = 80 + (row * 2 + col) * 140
+            QTimer.singleShot(
+                delay,
+                lambda site_id=adapter.id: self.go_home()
+                if self.adapter.id == site_id and self.state == PaneState.LOADING else None,
+            )
+        else:
+            self.view.setUrl(QUrl(adapter.home_url))
 
     @property
     def busy(self) -> bool:
@@ -183,23 +211,59 @@ class WebPane(QWidget):
         self._last_signature = ""
         self._last_text = ""
         self._stable_polls = 0
+        self._answer_version_count = 0
+        self._saw_generating = False
         self._automation_active = False
         self._last_snapshot = {}
+        self._deadline_at = 0.0
+        self._grace_retry_used = False
+        self._last_error = ""
+        self._completion_reason = ""
+        self._last_logged_phase = ""
         self.title_label.setText(adapter.name)
         self.retry_button.hide()
-        self._set_state(PaneState.LOADING)
+        self._set_state(PaneState.LOADING, "正在连接")
         self.view.setUrl(QUrl(adapter.home_url))
 
     def _set_state(self, state: PaneState, detail: str = "") -> None:
         self.state = state
-        color = STATE_COLORS[state]
-        self.status_dot.setStyleSheet(f"color:{color};")
+        self._pulse_dimmed = False
+        self._paint_status_dot()
         self.status_label.setText(detail or state.label)
-        self.status_label.setStyleSheet(f"color:{color};")
+        self.status_label.setStyleSheet(f"color:{STATE_COLORS[state]};")
         self.status_label.setToolTip(detail if state == PaneState.ERROR else "")
-        self.retry_button.setVisible(state == PaneState.ERROR and bool(self._question))
-        self.capture_button.setEnabled(bool(self._question) and state not in {PaneState.SENDING, PaneState.LOADING})
+        partial_error = state == PaneState.ERROR and bool(self._last_text)
+        self.retry_button.setText("登录后重试" if "未登录" in self._last_error else "重试")
+        self.retry_button.setFixedWidth(76 if "未登录" in self._last_error else 44)
+        self.retry_button.setVisible(state == PaneState.ERROR and bool(self._question) and not partial_error)
+        self.skip_button.setVisible(state in {PaneState.SENDING, PaneState.GENERATING})
+        self.capture_button.setText("确认收录" if partial_error else "补采")
+        self.capture_button.setFixedWidth(68 if partial_error else 44)
+        self.capture_button.setVisible(state == PaneState.GENERATING or partial_error)
+        self.capture_button.setEnabled(
+            (bool(self._question) and state == PaneState.GENERATING) or partial_error
+        )
+        if state in {PaneState.SENDING, PaneState.GENERATING}:
+            if not self.pulse_timer.isActive():
+                self.pulse_timer.start()
+        else:
+            self.pulse_timer.stop()
+            self._paint_status_dot()
         self.state_changed.emit(self.adapter.id, state)
+
+    def _paint_status_dot(self) -> None:
+        color = QColor(STATE_COLORS[self.state])
+        if self._pulse_dimmed and self.state in {PaneState.SENDING, PaneState.GENERATING}:
+            color.setAlpha(115)
+            self.status_dot.setStyleSheet(
+                f"color:rgba({color.red()},{color.green()},{color.blue()},{color.alpha()});"
+            )
+        else:
+            self.status_dot.setStyleSheet(f"color:{color.name()};")
+
+    def _pulse_status_dot(self) -> None:
+        self._pulse_dimmed = not self._pulse_dimmed
+        self._paint_status_dot()
 
     def _run_javascript(self, script: str, callback: Callable[[object], None]) -> None:
         def decode(raw: object) -> None:
@@ -226,15 +290,23 @@ class WebPane(QWidget):
         self._last_signature = ""
         self._last_text = ""
         self._stable_polls = 0
+        self._answer_version_count = 0
+        self._saw_generating = False
         self._manual_capture = False
         self._capture_url = ""
+        self._deadline_at = self._started_at + self.config.response_timeout_seconds
+        self._grace_retry_used = False
+        self._last_error = ""
+        self._completion_reason = ""
+        self._last_logged_phase = ""
         self._last_change_at = self._started_at
-        self._set_state(PaneState.SENDING)
+        self.poll_timer.setInterval(self.config.poll_interval_ms)
+        self._set_state(PaneState.SENDING, "正在发送问题")
         active_batch = self._batch_id
 
         def watchdog() -> None:
             if self._batch_id == active_batch and self.busy:
-                self._finish_error(self._timeout_message())
+                self._handle_timeout(active_batch)
 
         QTimer.singleShot(self.config.response_timeout_seconds * 1000, watchdog)
 
@@ -271,7 +343,7 @@ class WebPane(QWidget):
             if not data.get("ok"):
                 self._finish_error(str(data.get("detail") or data.get("code") or "发送失败"))
                 return
-            self._set_state(PaneState.GENERATING)
+            self._set_state(PaneState.GENERATING, "问题已发送")
             self.poll_timer.start()
             QTimer.singleShot(650, self._poll_answer)
             QTimer.singleShot(1800, lambda: self._retry_native_submit(active_batch))
@@ -307,6 +379,7 @@ class WebPane(QWidget):
             # character makes long report prompts spend minutes merely typing.
             position = 0
             used_ime = False
+            key_retry_used = False
 
             def type_next() -> None:
                 nonlocal position
@@ -328,7 +401,7 @@ class WebPane(QWidget):
                     return
 
                 def verify(raw: object) -> None:
-                    nonlocal used_ime
+                    nonlocal key_retry_used, position, used_ime
                     if active_batch != self._batch_id:
                         return
                     actual = str(raw.get("inputText", "")) if isinstance(raw, dict) else ""
@@ -340,6 +413,17 @@ class WebPane(QWidget):
                             key(Qt.Key.Key_A, "a", Qt.KeyboardModifier.ControlModifier)
                             key(Qt.Key.Key_Backspace)
                             type_next()
+                            return
+                        if not key_retry_used:
+                            # Hydrating controlled editors can drop an early
+                            # trusted key event even though their input node is
+                            # already visible. Nothing has been submitted yet,
+                            # so one verified clear-and-retype is safe.
+                            key_retry_used = True
+                            position = 0
+                            key(Qt.Key.Key_A, "a", Qt.KeyboardModifier.ControlModifier)
+                            key(Qt.Key.Key_Backspace)
+                            QTimer.singleShot(350, type_next)
                             return
                         callback({"ok": False, "code": "INPUT_MISMATCH",
                                   "detail": "网页输入内容与问题不一致，已阻止发送；可能是输入框兼容问题或网站长度限制。"})
@@ -413,9 +497,6 @@ class WebPane(QWidget):
             if active_batch != self._batch_id or self.state != PaneState.GENERATING:
                 return
             elapsed = time.monotonic() - self._started_at
-            if elapsed >= self.config.response_timeout_seconds:
-                self._finish_error(self._timeout_message())
-                return
 
             data = raw if isinstance(raw, dict) else {}
             self._last_snapshot = data
@@ -425,7 +506,9 @@ class WebPane(QWidget):
             signature = str(data.get("signature", ""))
             count = int(data.get("count", 0) or 0)
             generating = bool(data.get("generating"))
+            self._saw_generating = self._saw_generating or generating
             changed = bool(text) and (signature != self._baseline_signature or count > self._baseline_count)
+            self._adapt_poll_interval(changed, generating)
 
             current_url = str(data.get("url", ""))
             if self._manual_capture and QUrl(current_url) != QUrl(self._capture_url):
@@ -433,9 +516,13 @@ class WebPane(QWidget):
                 return
             input_text = str(data.get("inputText", "")).strip()
             login_redirect = any(marker in current_url.lower() for marker in ("sign_in", "signin", "login", "from_logout"))
+            login_required = bool(data.get("loginRequired"))
             message_not_sent = elapsed >= 12 and self._question in input_text and not changed and not generating
-            if login_redirect or message_not_sent:
-                self._finish_error("消息未发出：请确认已登录，或点击该面板的重试按钮")
+            if login_redirect or login_required:
+                self._finish_error(f"{self.adapter.name} 尚未登录：请先在该面板完成登录，再点击重试。")
+                return
+            if message_not_sent:
+                self._finish_error("消息未发出：请检查网页状态，或点击该面板的重试按钮")
                 return
 
             if changed and signature == self._last_signature:
@@ -443,28 +530,126 @@ class WebPane(QWidget):
             elif changed:
                 self._stable_polls = 0
                 self._last_change_at = time.monotonic()
+                self._answer_version_count += 1
             self._last_signature = signature
             if changed:
                 self._last_text = text
 
             seconds = int(elapsed)
-            evidence = bool(data.get("completed")) or self._manual_capture
-            if self.completion_marker:
-                evidence = self.completion_marker in text
+            explicit_evidence = bool(data.get("completed"))
+            marker_found = bool(self.completion_marker and self.completion_marker in text)
+            fallback_quiet = max(0.0, self.adapter.completion_fallback_quiet_seconds)
+            fallback_lifecycle = (
+                self._saw_generating
+                or self._answer_version_count >= 3
+                or (
+                    self.adapter.completion_fallback_action_count > 0
+                    and int(data.get("completionControlCount", 0) or 0)
+                    >= self.adapter.completion_fallback_action_count
+                )
+            )
+            fallback_complete = bool(
+                fallback_quiet
+                and changed
+                and not generating
+                and not data.get("reasoningOnly")
+                and len(text) >= self.adapter.completion_fallback_min_chars
+                and fallback_lifecycle
+                and time.monotonic() - self._last_change_at >= fallback_quiet
+            )
+            absolute_quiet = max(0.0, self.adapter.completion_absolute_quiet_seconds)
+            absolute_complete = bool(
+                absolute_quiet
+                and changed
+                and not generating
+                and not data.get("reasoningOnly")
+                and len(text) >= self.adapter.completion_absolute_min_chars
+                and time.monotonic() - self._last_change_at >= absolute_quiet
+            )
+            if self._manual_capture:
+                completion_reason = "manual"
+            elif marker_found:
+                completion_reason = "marker"
+            elif explicit_evidence:
+                completion_reason = "site-control"
+            elif fallback_complete:
+                completion_reason = "observed-lifecycle"
+            elif absolute_complete:
+                completion_reason = "quiet-window"
+            else:
+                completion_reason = "waiting"
+            evidence = explicit_evidence or marker_found or fallback_complete or absolute_complete or self._manual_capture
             confirmed = (evidence or not self.adapter.require_completion_evidence) and not data.get("reasoningOnly")
-            detail = "补采中" if self._manual_capture else "生成中"
-            if changed and not generating and not confirmed:
+            self._completion_reason = completion_reason
+            detail = "正在补采原文" if self._manual_capture else "正在思考"
+            if self._grace_retry_used and not self._manual_capture:
+                detail = "已收到回答，正在自动复查"
+            elif changed and generating and not self._manual_capture:
+                detail = "正在输出"
+            elif changed and not generating and not confirmed:
                 detail = "等待完整正文"
-            self._set_state(PaneState.GENERATING, f"{detail} {seconds}s")
+            marker_only = bool(data.get("completedByMarker")) and not self._manual_capture
+            quiet_seconds = max(0.0, self.adapter.completion_quiet_seconds) if marker_only else 0.0
+            quiet_ready = time.monotonic() - self._last_change_at >= quiet_seconds
+            if changed and not generating and confirmed and not quiet_ready:
+                detail = "正在确认完整性"
+            elif changed and not generating and confirmed and not self._manual_capture:
+                detail = "正在确认完整性"
+            self._set_state(PaneState.GENERATING, f"{detail} · {seconds} 秒")
+            phase = (
+                f"changed={int(changed)} busy={int(generating)} "
+                f"reasoning={int(bool(data.get('reasoningOnly')))} evidence={completion_reason}"
+            )
+            if phase != self._last_logged_phase:
+                self._last_logged_phase = phase
+                logger.info(
+                    "%s capture lifecycle: %s chars=%s versions=%s stable=%s",
+                    self.adapter.id,
+                    phase,
+                    len(text),
+                    self._answer_version_count,
+                    self._stable_polls,
+                )
+            # Manual recapture is an explicit user assertion that the visible
+            # response has finished. Some sites keep a stale Stop-like control
+            # mounted forever; after the captured text itself is stable, that
+            # stale site signal must not trap recapture indefinitely.
+            manual_ready = bool(
+                self._manual_capture
+                and changed
+                and not data.get("reasoningOnly")
+                and self._stable_polls >= self.config.stable_poll_count
+                and time.monotonic() - self._last_change_at
+                >= max(2.0, self.config.poll_interval_ms * self.config.stable_poll_count / 1000)
+            )
             # A hidden/changed stop button is not proof that a long synthesis
             # ended. Allow a longer quiet period when its finish marker is absent.
-            report_ready = (not self.completion_marker or self.completion_marker in text
-                            or time.monotonic() - self._last_change_at >= 30)
-            if (changed and not generating and confirmed and report_ready
+            # The requested marker is preferred, but a website's own finished
+            # control is also transport-level proof that output has stopped.  Do
+            # not leave a visibly finished report idle for 30 seconds merely
+            # because the model omitted our marker; AnalysisPlan still validates
+            # its headings and source coverage before accepting it.
+            report_ready = (
+                self._manual_capture
+                or not self.completion_marker
+                or marker_found
+                or ((explicit_evidence or fallback_complete)
+                    and time.monotonic() - self._last_change_at >= 5)
+                or time.monotonic() - self._last_change_at >= 18
+            )
+            if (changed and (not generating or manual_ready) and confirmed and report_ready and quiet_ready
                     and self._stable_polls >= self.config.stable_poll_count):
                 self.poll_timer.stop()
                 self._automation_active = False
-                self._set_state(PaneState.DONE)
+                self._set_state(PaneState.DONE, "已收录")
+                logger.info(
+                    "%s captured after %.1fs: evidence=%s chars=%s versions=%s",
+                    self.adapter.id,
+                    elapsed,
+                    completion_reason,
+                    len(self._last_text),
+                    self._answer_version_count,
+                )
                 self.answer_ready.emit(
                     AnswerResult(
                         site_id=self.adapter.id,
@@ -475,12 +660,44 @@ class WebPane(QWidget):
                         elapsed_seconds=elapsed,
                     )
                 )
+                return
+            deadline = self._deadline_at or self._started_at + self.config.response_timeout_seconds
+            if deadline and time.monotonic() >= deadline:
+                self._handle_timeout(active_batch)
 
         self._run_javascript(self.adapter.snapshot_script(), after_poll)
 
+    def _adapt_poll_interval(self, changed: bool, generating: bool) -> None:
+        """Poll quickly while text streams and gently while the model only thinks."""
+        base = self.config.poll_interval_ms
+        if base < 200:  # Keep deterministic fast intervals used by integration tests.
+            target = base
+        elif changed and generating:
+            target = min(base, 700)
+        elif changed:
+            target = min(base, 900)
+        else:
+            target = max(base, 1500)
+        if self.poll_timer.interval() != target:
+            self.poll_timer.setInterval(target)
+
+    def _handle_timeout(self, active_batch: str) -> None:
+        if active_batch != self._batch_id or not self.busy:
+            return
+        if self._last_text and not self._manual_capture and not self._grace_retry_used:
+            self._grace_retry_used = True
+            grace_seconds = max(1, self.config.completion_grace_seconds)
+            self._deadline_at = time.monotonic() + grace_seconds
+            self._set_state(PaneState.GENERATING, "已收到回答，正在自动复查")
+            QTimer.singleShot(grace_seconds * 1000, lambda: self._handle_timeout(active_batch))
+            self._poll_answer()
+            return
+        self._finish_error(self._timeout_message())
+
     def _timeout_message(self) -> str:
         if self._last_text:
-            return ("等待回答超时：已保留采集内容，但尚未确认完整结束。"
+            prefix = "已自动复查一次，仍无法确认完整结束：" if self._grace_retry_used else "等待回答超时："
+            return (prefix + "已保留采集内容，但尚未确认完整结束。"
                     "网页随后生成完成时，请点击本面板的“补采”，无需重新提问。")
         return f"等待回答超时（{self.config.response_timeout_seconds} 秒）；网页完成后可点击“补采”。"
 
@@ -505,9 +722,17 @@ class WebPane(QWidget):
         self._manual_capture = True
         self._capture_url = original_url
         self._started_at = time.monotonic()
+        self._deadline_at = self._started_at + self.config.response_timeout_seconds
+        self._grace_retry_used = False
+        self._last_error = ""
+        self._completion_reason = ""
+        self._last_logged_phase = ""
         self._last_change_at = self._started_at
+        self.poll_timer.setInterval(self.config.poll_interval_ms)
         self._last_signature = ""
         self._stable_polls = 0
+        self._answer_version_count = 0
+        self._saw_generating = False
         self._automation_active = True
         self.collection_started.emit(self.adapter.id)
         self._set_state(PaneState.GENERATING, "补采原文中")
@@ -516,7 +741,7 @@ class WebPane(QWidget):
 
         def watchdog() -> None:
             if self._batch_id == active_batch and self.busy:
-                self._finish_error(self._timeout_message())
+                self._handle_timeout(active_batch)
 
         QTimer.singleShot(self.config.response_timeout_seconds * 1000, watchdog)
         self._poll_answer()
@@ -525,6 +750,7 @@ class WebPane(QWidget):
         self._batch_id = uuid4().hex
         self.poll_timer.stop()
         self._automation_active = False
+        self._last_error = message
         elapsed = max(0.0, time.monotonic() - self._started_at) if self._started_at else 0.0
         logger.warning(
             "%s failed after %.1fs: %s; url=%s; last_snapshot=%s",
@@ -538,6 +764,8 @@ class WebPane(QWidget):
         detail = ("原文待确认" if self._last_text else "回答超时") if "等待回答超时" in message else "发送失败"
         if "网页输入内容" in message:
             detail = "输入校验失败"
+        if "未登录" in message:
+            detail = "需要登录"
         self._set_state(PaneState.ERROR, detail)
         self.status_label.setToolTip(message)
         self.answer_ready.emit(
@@ -554,6 +782,7 @@ class WebPane(QWidget):
 
     def retry(self) -> None:
         if self._question:
+            self.collection_started.emit(self.adapter.id)
             self.dispatch(self._question, self._batch_id)
 
     def cancel(self, emit_result: bool = True) -> None:
@@ -578,6 +807,25 @@ class WebPane(QWidget):
                     )
                 )
 
+    def cancel_pending(self, question: str) -> None:
+        """Finish a staggered dispatch that the user cancelled before it started."""
+        if self.busy:
+            self.cancel()
+            return
+        self._question = question
+        self._last_text = ""
+        self._last_error = "用户取消"
+        self._set_state(PaneState.CANCELLED, "已跳过")
+        self.answer_ready.emit(
+            AnswerResult(
+                site_id=self.adapter.id,
+                site_name=self.adapter.name,
+                question=question,
+                state=PaneState.CANCELLED,
+                error="用户取消",
+            )
+        )
+
     def diagnose(self) -> None:
         def done(raw: object) -> None:
             def with_capture(snapshot: object) -> None:
@@ -587,6 +835,10 @@ class WebPane(QWidget):
                                                if key not in {"text", "inputText", "signature"}}
                     payload["captureState"]["textLength"] = len(str(snapshot.get("text", "")))
                     payload["captureState"]["requiresCompletionEvidence"] = self.adapter.require_completion_evidence
+                    payload["captureState"]["answerVersions"] = self._answer_version_count
+                    payload["captureState"]["stablePolls"] = self._stable_polls
+                    payload["captureState"]["sawGenerating"] = self._saw_generating
+                    payload["captureState"]["completionReason"] = self._completion_reason
                 self.diagnostic_ready.emit(self.adapter.id, json.dumps(payload, ensure_ascii=False, indent=2))
 
             self._run_javascript(self.adapter.snapshot_script(), with_capture)
@@ -602,13 +854,13 @@ class WebPane(QWidget):
     def _on_load_finished(self, ok: bool) -> None:
         self._apply_zoom()
         if not self._automation_active:
-            self._set_state(PaneState.READY if ok else PaneState.ERROR, "就绪" if ok else "加载失败")
+            self._set_state(PaneState.READY if ok else PaneState.ERROR, "可以提问" if ok else "加载失败")
 
     def _on_load_started(self) -> None:
         if self._manual_capture and self._automation_active:
             self._finish_error("补采期间网页发生导航，已停止；请核对当前问题后重新补采。")
         if not self._automation_active:
-            self._set_state(PaneState.LOADING)
+            self._set_state(PaneState.LOADING, "正在连接")
 
     def _apply_zoom(self) -> None:
         self.view.setZoomFactor(self.zoom)

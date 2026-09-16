@@ -84,7 +84,10 @@ class SynthesisClient(QObject):
                     if cancelled.is_set():
                         break
                     try:
-                        plan.accept(text)
+                        # API finish_reason=stop is transport-level completion.
+                        # A structurally complete final report need not be sent a
+                        # second time solely because the model omitted our marker.
+                        plan.accept(text, allow_completed_without_marker=True)
                     except ValueError as error:
                         self.checkpoint.emit(plan.record.to_json())
                         if plan.repair(str(error)):

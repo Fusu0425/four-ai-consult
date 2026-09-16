@@ -63,6 +63,96 @@ def test_missing_finish_marker_and_source_never_count_as_complete():
     assert plan.record.status == "complete"
 
 
+def test_transport_completed_structured_report_does_not_regenerate_for_missing_marker():
+    plan = AnalysisPlan(session(), "免费网页版", "deepseek")
+    task = plan.next_task()
+    citations = " ".join(f"[{sid}]" for sid in task.source_ids)
+    report = f"""## 先看结论
+
+预算有限时优先 A；条件变化时改选 B。{citations}
+
+## 各家怎么回答
+
+DeepSeek 强调预算，Kimi 强调稳定性。{citations}
+
+## 逐项对比
+
+成本、风险、维护难度和适用条件需要分别比较。{citations}
+
+## 共识、分歧与独有观点
+
+共同点是先确认约束，分歧来自风险偏好。{citations}
+
+## 建议与下一步
+
+先验证预算和维护资源，再按条件选择。{citations}
+
+## 本次来源编号覆盖清单
+
+全部来源已经逐项纳入比较。{citations}
+
+{"完整报告内容。" * 80}
+"""
+    plan.accept(report, allow_completed_without_marker=True)
+    assert plan.record.status == "complete"
+    assert plan.record.conclusion == report.rstrip()
+    assert plan.next_task() is None
+
+
+def test_transport_completed_report_with_renamed_headings_does_not_regenerate():
+    plan = AnalysisPlan(session(), "免费网页版", "deepseek")
+    task = plan.next_task()
+    citations = " ".join(f"[{sid}]" for sid in task.source_ids)
+    report = (
+        "## 直接建议\n预算有限时先选 A，维护资源充足时再考虑 B。\n"
+        "## 模型观点\nDeepSeek 强调预算，Kimi 强调稳定性。\n"
+        "## 差异和做法\n比较成本、风险、维护难度、适用条件和下一步验证。\n"
+        + citations + "\n" + "完整报告内容，保留依据、条件、例外、风险和行动建议。" * 40
+    )
+    plan.accept(report, allow_completed_without_marker=True)
+    assert plan.record.status == "complete"
+    assert not plan.record.repair_events
+
+
+def test_transport_completed_short_report_still_gets_one_recorded_repair():
+    plan = AnalysisPlan(session(), "免费网页版", "deepseek")
+    task = plan.next_task()
+    with pytest.raises(ValueError, match="完整结构校验"):
+        plan.accept("看起来像报告但缺少结构 " + " ".join(f"[{sid}]" for sid in task.source_ids),
+                    allow_completed_without_marker=True)
+    assert plan.repair("缺少结构")
+    assert not plan.repair("再次失败")
+    assert plan.record.repair_events[0]["reason"] == "缺少结构"
+    assert plan.record.repair_events[0]["output_chars"] > 0
+    restored = ReportRecord.from_json(plan.record.to_json())
+    assert restored.repair_events == plan.record.repair_events
+
+
+def test_chinese_question_rejects_english_heavy_bilingual_final_report():
+    plan = AnalysisPlan(session(), "免费网页版", "kimi")
+    task = plan.next_task()
+    citations = " ".join(f"[{sid}]" for sid in task.source_ids)
+    english = ("This is an English analysis duplicated from the model reasoning process. " * 30)
+    with pytest.raises(ValueError, match="简体中文"):
+        plan.accept(f"中文引言。{citations}\n{english}\n{task.marker}")
+    assert plan.record.status == "pending"
+    assert english in plan.record.partial_output
+
+
+def test_chinese_report_allows_necessary_english_names_and_technical_terms():
+    plan = AnalysisPlan(session(), "免费网页版", "kimi")
+    task = plan.next_task()
+    citations = " ".join(f"[{sid}]" for sid in task.source_ids)
+    body = (
+        "综合结论：建议先确认预算、风险承受能力和实施期限，再做选择。"
+        "DeepSeek 与 Kimi 的侧重点不同，但这些产品名称不影响中文报告的可读性。"
+        "技术实现可保留 API、HTML、Markdown 等必要术语，其余解释全部使用简体中文。"
+        "逐项比较还应覆盖成本、收益、失败条件、反对意见、适用边界以及下一步验证方法。"
+    ) * 8
+    plan.accept(f"{body}\n{citations}\n{task.marker}")
+    assert plan.record.status == "complete"
+
+
 def test_large_final_material_generates_retained_volumes_without_cutting_notes():
     plan = AnalysisPlan(session(), "免费网页版", "deepseek", input_limit=3500)
     plan.record.notes = ["重要限定" * 900 + f"[{s.id}]" for s in plan.record.sources]

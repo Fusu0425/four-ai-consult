@@ -61,7 +61,8 @@ def test_repeated_consultation_id_does_not_reuse_watchdog(monkeypatch):
 
     class Pane:
         busy = True
-        config = SimpleNamespace(response_timeout_seconds=1)
+        config = SimpleNamespace(response_timeout_seconds=1, poll_interval_ms=1200)
+        poll_timer = SimpleNamespace(setInterval=lambda _: None)
         adapter = SimpleNamespace(snapshot_script=lambda: "snapshot")
         errors = []
 

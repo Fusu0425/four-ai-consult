@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from .consensus import build_basic_report
 from .models import AnswerResult, ConsultationSession, PaneState
 from .pilot import sanitized_diagnostic, write_json
 from .pilot_ui import PilotCenter
+from .report_export import HTML_FILTER, write_report_export
 from .report_ui import ReportDialog, SafeReportBrowser
 from .storage import ConsultationRepository, HistoryItem
 from .webpane import WebPane
@@ -221,7 +222,8 @@ class HistoryDialog(QDialog):
 
         buttons = QHBoxLayout()
         copy_button = QPushButton("复制")
-        export_button = QPushButton("导出 Markdown")
+        export_button = QPushButton("导出 / 分享…")
+        export_button.setToolTip("推荐网页报告，手机打开更舒适；也可选择 Markdown。")
         delete_button = QPushButton("删除")
         close_button = QPushButton("关闭")
         open_button = QPushButton("打开多页报告 / 继续综合")
@@ -310,10 +312,13 @@ class HistoryDialog(QDialog):
         item = self.items_by_id.get(self._selected_id())
         if not item:
             return
-        default = self.report_dir / f"会诊报告-{item.started_at[:10]}-{item.id[:8]}.md"
-        path, _ = QFileDialog.getSaveFileName(self, "导出会诊记录", str(default), "Markdown (*.md)")
+        default = self.report_dir / f"会诊报告-{item.started_at[:10]}-{item.id[:8]}.html"
+        path, selected_filter = QFileDialog.getSaveFileName(self, "导出会诊记录", str(default), HTML_FILTER)
         if path:
-            Path(path).write_text(self._selected_report(), encoding="utf-8")
+            try:
+                write_report_export(path, selected_filter, self._selected_report(), question=item.question)
+            except OSError as error:
+                QMessageBox.warning(self, "导出失败", str(error))
 
     def delete_selected(self) -> None:
         item = self.items_by_id.get(self._selected_id())
@@ -354,6 +359,13 @@ class MainWindow(QMainWindow):
         self._cancelling = False
         self._model_signal_guard = False
         self._save_failed = False
+        self._dispatch_generation = 0
+        self._pending_site_ids: set[str] = set()
+        self._draft_dirty = False
+        self._draft_timer = QTimer(self)
+        self._draft_timer.setSingleShot(True)
+        self._draft_timer.setInterval(450)
+        self._draft_timer.timeout.connect(self._save_draft)
         self.help_dialog = None
         self.active_model_ids = self._load_active_model_ids()
 
@@ -366,7 +378,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
         root.addWidget(self._build_toolbar())
 
-        self.progress_label = QLabel("请先分别登录四个 AI，然后在上方输入问题。")
+        self.progress_label = QLabel("正在准备四个 AI 网页，请稍候……")
         self.progress_label.setObjectName("progressLabel")
         self.progress_label.setContentsMargins(18, 8, 18, 9)
         root.addWidget(self.progress_label)
@@ -391,6 +403,7 @@ class MainWindow(QMainWindow):
                 col=index % 2,
                 row=index // 2,
                 on_fullscreen=self.toggle_maximize,
+                defer_initial_load=True,
             )
             pane.state_changed.connect(self._on_pane_state)
             pane.answer_ready.connect(self._on_answer_ready)
@@ -456,10 +469,15 @@ class MainWindow(QMainWindow):
         self.question_input = QLineEdit()
         self.question_input.setObjectName("questionInput")
         self.question_input.setPlaceholderText("写下这次真正需要判断的问题……")
+        pending_question = str(self.settings.value("pending_question", "") or "")
+        self.question_input.setText(pending_question)
+        self.question_input.textChanged.connect(self._queue_draft_save)
         self.question_input.returnPressed.connect(self.broadcast)
+        self.submit_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self.submit_shortcut.activated.connect(self.broadcast)
         self.send_button = QPushButton("开始会诊")
         self.send_button.setObjectName("primaryButton")
-        self.cancel_button = QPushButton("取消")
+        self.cancel_button = QPushButton("停止本轮")
         self.cancel_button.setObjectName("quietButton")
         self.cancel_button.hide()
         self.report_button = QPushButton("查看报告")
@@ -549,23 +567,55 @@ class MainWindow(QMainWindow):
 
         selected_panes = list(self.panes)
         self.session = ConsultationSession(question=question, site_ids=tuple(p.adapter.id for p in selected_panes))
+        self._dispatch_generation += 1
+        dispatch_generation = self._dispatch_generation
+        self._pending_site_ids = set(self.session.site_ids)
         self._reported_session_id = ""
         self.report_button.setEnabled(False)
+        self.report_button.setText("查看报告")
         self.send_button.setEnabled(False)
         self.models_button.setEnabled(False)
         self.cancel_button.show()
-        self.progress_label.setText(f"正在把问题发送给 {len(selected_panes)} 个 AI……")
+        self.progress_label.setText(f"问题已提交，{len(selected_panes)} 位 AI 正在接收……")
         self._save_session()
-        for pane in selected_panes:
-            pane.dispatch(question, self.session.id)
+        if not self._save_failed:
+            self._draft_timer.stop()
+            self._draft_dirty = False
+            self.settings.remove("pending_question")
+            self.settings.sync()
+        # A short stagger keeps the four embedded browsers responsive while
+        # remaining effectively simultaneous to the user.
+        for index, pane in enumerate(selected_panes):
+            QTimer.singleShot(
+                index * 220,
+                lambda pane=pane: self._dispatch_one(
+                    pane, question, self.session.id, dispatch_generation
+                ),
+            )
+
+    def _dispatch_one(self, pane: WebPane, question: str, session_id: str, generation: int) -> None:
+        if (
+            generation != self._dispatch_generation
+            or not self.session
+            or self.session.id != session_id
+            or pane.adapter.id not in self._pending_site_ids
+        ):
+            return
+        self._pending_site_ids.discard(pane.adapter.id)
+        pane.dispatch(question, session_id)
 
     def cancel_all(self) -> None:
+        self._dispatch_generation += 1
         self._cancelling = True
         try:
             for pane in self.panes:
-                pane.cancel()
+                if pane.busy:
+                    pane.cancel()
+                elif self.session and pane.adapter.id in self._pending_site_ids:
+                    pane.cancel_pending(self.session.question)
         finally:
             self._cancelling = False
+            self._pending_site_ids.clear()
         self.send_button.setEnabled(True)
         self.models_button.setEnabled(True)
         self.cancel_button.hide()
@@ -575,16 +625,59 @@ class MainWindow(QMainWindow):
         if self.session and state == PaneState.SENDING:
             self.session.results.pop(site_id, None)
             self._reported_session_id = ""
+        self._update_progress()
+
+    def _update_progress(self) -> None:
         counts = {item: 0 for item in PaneState}
         active_site_ids = set(self.session.site_ids) if self.session else {pane.adapter.id for pane in self.panes}
         for pane in self.panes:
             if pane.adapter.id not in active_site_ids:
                 continue
             counts[pane.state] += 1
-        self.progress_label.setText(
-            f"已完成 {counts[PaneState.DONE]} · 生成中 {counts[PaneState.GENERATING]} · "
-            f"发送中 {counts[PaneState.SENDING]} · 失败 {counts[PaneState.ERROR]}"
-        )
+        total = len(active_site_ids)
+        if not self.session:
+            ready = counts[PaneState.READY]
+            failed = counts[PaneState.ERROR]
+            if ready == total:
+                text = "四个 AI 已准备好，可以开始会诊。"
+            else:
+                text = f"正在准备 AI 网页 · 已就绪 {ready}/{total}"
+                if failed:
+                    text += f" · {failed} 个网页需要检查"
+            self.progress_label.setText(text)
+            return
+
+        successful = len(self.session.successful_results)
+        completed = len(self.session.results)
+        if successful:
+            self.report_button.setEnabled(True)
+            self.report_button.setText(
+                "查看报告" if self.session.complete else f"查看已有结果 {successful}/{total}"
+            )
+        if self.session.complete:
+            skipped = counts[PaneState.CANCELLED]
+            failed = counts[PaneState.ERROR]
+            text = f"本轮完成 · {successful}/{total} 家回答已收录"
+            if failed:
+                text += f" · {failed} 家需要处理"
+            if skipped:
+                text += f" · 已跳过 {skipped} 家"
+            self.progress_label.setText(text + " · 可以查看完整报告。")
+            return
+
+        active = [
+            pane.adapter.name
+            for pane in self.panes
+            if pane.adapter.id in active_site_ids and pane.state in {PaneState.SENDING, PaneState.GENERATING}
+        ]
+        text = f"会诊进行中 · 已完成 {successful}/{total}"
+        if active:
+            text += " · " + "、".join(active) + "正在回答"
+        elif completed < total:
+            text += " · 正在连接其余模型"
+        if successful:
+            text += " · 可先查看已有结果"
+        self.progress_label.setText(text)
 
     def _on_collection_started(self, site_id: str) -> None:
         if not self.session or site_id not in self.session.site_ids:
@@ -593,6 +686,7 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(False)
         self.models_button.setEnabled(False)
         self.cancel_button.show()
+        self._update_progress()
 
     def _on_answer_ready(self, result: AnswerResult) -> None:
         if not self.session or result.question != self.session.question:
@@ -604,15 +698,16 @@ class MainWindow(QMainWindow):
         if self.report_dialog:
             self.report_dialog.update_session(self.session, build_basic_report(self.session))
         self.report_button.setEnabled(True)
+        self._update_progress()
         if not self.session.complete:
             return
         self.send_button.setEnabled(True)
         self.models_button.setEnabled(True)
         self.cancel_button.hide()
         self.report_button.setEnabled(True)
-        successes = len(self.session.successful_results)
-        self.progress_label.setText(
-            f"本轮完成：{successes}/{len(self.session.site_ids)} 家获得回答，可以查看会诊报告。"
+        self._notify_if_background(
+            "会诊完成",
+            f"已收录 {len(self.session.successful_results)}/{len(self.session.site_ids)} 家回答，可以查看报告。",
         )
         if not self._cancelling and self.auto_report.isChecked() and self._reported_session_id != self.session.id:
             self._reported_session_id = self.session.id
@@ -656,6 +751,9 @@ class MainWindow(QMainWindow):
             config=self.config,
             repository=self.repository,
             secret_store=self.secret_store,
+        )
+        self.report_dialog.report_completed.connect(
+            lambda: self._notify_if_background("报告已生成", "完整对比报告已经生成，可以开始阅读。")
         )
         self.report_dialog.show()
         self.report_dialog.raise_()
@@ -804,11 +902,33 @@ class MainWindow(QMainWindow):
             pane.set_fullscreen_state(pane is self._maximized_pane)
 
     def _save_state(self) -> None:
+        if self._draft_dirty:
+            self._save_draft()
         self.settings.setValue("geometry_v2", self.saveGeometry())
         if not self._maximized_pane:
             self.settings.setValue("outer_sizes", self.split_container.outer.sizes())
             self.settings.setValue("left_sizes", self.split_container.left.sizes())
             self.settings.setValue("right_sizes", self.split_container.right.sizes())
+
+    def _queue_draft_save(self, _text: str) -> None:
+        self._draft_dirty = True
+        self._draft_timer.start()
+
+    def _save_draft(self) -> None:
+        if not self._draft_dirty:
+            return
+        text = self.question_input.text()
+        if text:
+            self.settings.setValue("pending_question", text)
+        else:
+            self.settings.remove("pending_question")
+        self.settings.sync()
+        self._draft_dirty = False
+
+    def _notify_if_background(self, title: str, message: str) -> None:
+        tray = getattr(self, "tray", None)
+        if tray and (not self.isVisible() or not self.isActiveWindow()):
+            tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3500)
 
     @staticmethod
     def _sizes(value) -> list[int] | None:
@@ -886,11 +1006,24 @@ class MainWindow(QMainWindow):
         if self._quitting or not QSystemTrayIcon.isSystemTrayAvailable():
             event.accept()
             return
+        report_busy = any(dialog._busy for dialog in self.findChildren(ReportDialog))
+        if any(pane.busy for pane in self.panes) or report_busy:
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("任务仍在进行")
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setText("会诊或报告仍在进行。是否让它在系统托盘继续运行？")
+            background = dialog.addButton("后台继续", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton("留在窗口", QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            if dialog.clickedButton() is not background:
+                event.ignore()
+                return
         event.ignore()
         self.hide()
         self.tray.showMessage(
             "四模型会诊",
-            "已最小化到托盘，四个站点保持运行。",
+            "已在托盘继续运行；任务完成后会通知你。" if any(pane.busy for pane in self.panes) or report_busy
+            else "已最小化到托盘，四个站点保持运行。",
             QSystemTrayIcon.MessageIcon.Information,
             2500,
         )
