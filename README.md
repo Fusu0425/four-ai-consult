@@ -48,20 +48,20 @@
 
 ## 下载 Windows 版
 
-### 推荐：单文件版
+### 推荐：标准安装版
 
-[下载 `FourAIConsult-0.7.14-onefile.exe`](https://github.com/Fusu0425/four-ai-consult/releases/download/v0.7.14/FourAIConsult-0.7.14-onefile.exe)
+[下载 `FourAIConsult-Setup-0.7.14.exe`](https://github.com/Fusu0425/four-ai-consult/releases/download/v0.7.14/FourAIConsult-Setup-0.7.14.exe)
 
 - 不需要解压软件；
 - 不需要安装 Python；
-- 下载后直接运行；
-- 单文件首次启动需要临时展开运行组件，因此可能比便携版慢一些。
+- 按安装向导完成后，从桌面快捷方式启动；
+- 使用普通程序目录安装，不再采用容易触发杀毒软件误报的单文件自解压结构。
 
 ### 备用：便携版
 
-[打开 v0.7.14 发布页面](https://github.com/Fusu0425/four-ai-consult/releases/tag/v0.7.14)，下载 `FourAIConsult-0.7.14-portable.zip`，完整解压后运行。请保留 `_internal` 文件夹。
+[打开 v0.7.14 发布页面](https://github.com/Fusu0425/four-ai-consult/releases/tag/v0.7.14)，下载 `FourAIConsult-0.7.14-portable.zip`，在 Windows 文件资源管理器中右键选择“全部解压”，然后运行 `FourAIConsult.exe`。请保留 `_internal` 文件夹。
 
-> GitHub 自动生成的 `Source code.zip` 是源代码，不是普通用户可直接运行的程序。由于当前版本尚未购买 Windows 代码签名证书，系统可能显示“未知发布者”。
+> GitHub 自动生成的 `Source code.zip` 是源代码，不是普通用户可直接运行的程序。当前版本尚未购买 Windows 代码签名证书，因此系统可能显示“未知发布者”；请只从本仓库的 Release 下载，不要关闭安全软件或添加杀毒白名单。
 
 ## 主要功能
 
